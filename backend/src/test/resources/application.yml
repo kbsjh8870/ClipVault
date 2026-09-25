@@ -1,15 +1,20 @@
+# 테스트 전용 설정. 테스트 실행 시 main의 application.yml 대신 이 파일이 쓰인다.
+# 실제 PostgreSQL이나 환경변수 없이도 테스트가 돌아가도록 모든 값을 여기서 직접 지정한다.
 spring:
   datasource:
+    # H2 메모리 DB를 PostgreSQL 호환 모드로 사용. DB_CLOSE_DELAY=-1: 연결이 모두 닫혀도 테스트 도중 DB가 사라지지 않게 유지
     url: jdbc:h2:mem:clipvault;MODE=PostgreSQL;DB_CLOSE_DELAY=-1
     username: sa
     password: ""
   jpa:
     hibernate:
+      # 테스트 시작 시 엔티티를 보고 테이블을 새로 만들고, 끝나면 지운다
       ddl-auto: create-drop
     open-in-view: false
 
 clipvault:
   jwt:
+    # 테스트용 서명 키 (32바이트 이상이어야 함)
     secret: test-jwt-secret-that-is-at-least-32-bytes-long-0123456789
     access-ttl: 15m
     refresh-ttl: 30d

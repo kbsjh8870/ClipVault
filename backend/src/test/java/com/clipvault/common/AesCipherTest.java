@@ -6,9 +6,15 @@ import java.util.Base64;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+/** {@link AesCipher} 단위 테스트. 스프링 없이 객체를 직접 만들어서 검사한다. */
 class AesCipherTest {
+    /** 테스트용 키: base64("0123456789abcdef0123456789abcdef") = 32바이트. */
     static final String KEY = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=";
 
+    /**
+     * ① 암호화했다가 복호화하면 원문이 그대로 돌아오는지 (한글, 줄바꿈, 탭 포함)
+     * ② 같은 원문을 두 번 암호화하면 결과가 서로 다른지 (매번 랜덤 IV를 쓰는지)
+     */
     @Test
     void roundTripAndNonDeterministic() {
         AesCipher cipher = new AesCipher(KEY);
@@ -20,7 +26,7 @@ class AesCipherTest {
         assertNotEquals(c1, c2, "same plaintext must yield different ciphertext (random IV)");
         assertEquals(plain, cipher.decrypt(c1));
         assertEquals(plain, cipher.decrypt(c2));
-        // base64 with 12-byte IV prefix + 16-byte GCM tag
+        // 저장 형식 확인: 최소한 IV(12바이트) + 인증 태그(16바이트)는 들어 있어야 한다
         assertTrue(Base64.getDecoder().decode(c1).length >= 12 + 16);
     }
 }

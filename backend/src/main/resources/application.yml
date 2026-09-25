@@ -1,23 +1,36 @@
+# 백엔드 운영 설정. ${이름} 은 환경변수에서 값을 읽는다는 뜻이고, ${이름:기본값} 은 환경변수가 없을 때 기본값을 쓴다.
+# 비밀값(DB 비밀번호, JWT 키, 암호화 키)은 절대 이 파일에 직접 적지 않는다.
 server:
+  # 서버 포트. Fly.io/Railway 같은 호스팅은 PORT 환경변수로 포트를 정해 준다.
   port: ${PORT:8080}
 
 spring:
   datasource:
+    # PostgreSQL 접속 주소. 예: jdbc:postgresql://localhost:5432/clipvault
     url: ${DB_URL}
     username: ${DB_USERNAME:}
     password: ${DB_PASSWORD:}
   jpa:
     hibernate:
+      # 엔티티(User/Device/Clip)를 보고 테이블이 없으면 만들고, 컬럼이 추가되면 반영한다. (기존 데이터는 지우지 않음)
       ddl-auto: update
+    # 화면 렌더링까지 DB 연결을 붙잡고 있는 기능. REST API 서버에는 필요 없어서 끈다.
     open-in-view: false
 
 clipvault:
   jwt:
+    # 토큰 서명용 비밀키. 32바이트(글자) 이상이어야 서버가 뜬다.
     secret: ${JWT_SECRET}
+    # access 토큰 수명 (짧게: 유출돼도 피해 시간이 짧도록)
     access-ttl: 15m
+    # refresh 토큰 수명 (길게: 30일 동안 다시 로그인할 필요 없음)
     refresh-ttl: 30d
   crypto:
+    # 클립 내용 암호화 키. base64로 인코딩한 32바이트. 생성 예: openssl rand -base64 32
+    # 이 키를 잃어버리면 저장된 클립을 복호화할 수 없다.
     key: ${CLIP_ENCRYPTION_KEY}
   clip:
+    # 클립 보관 기간. 지나면 목록에서 사라지고 배치가 삭제한다.
     ttl: 7d
+    # 만료 클립 삭제 배치 실행 시각 (초 분 시 일 월 요일) → 매일 새벽 4시
     cleanup-cron: "0 0 4 * * *"
