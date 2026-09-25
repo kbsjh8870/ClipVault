@@ -8,13 +8,13 @@ import com.clipvault.client.network.ApiClient;
 import com.clipvault.client.network.ClipSocket;
 import com.clipvault.client.ui.ClipListWindow;
 import com.clipvault.client.ui.DeviceDialog;
+import com.clipvault.client.ui.Theme;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
-import java.awt.image.BufferedImage;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -72,6 +72,7 @@ public class TrayApp {
             System.err.println("System tray is not supported on this platform.");
             System.exit(1);
         }
+        Theme.setup(); // 화면을 만들기 전에 테마(FlatLaf)를 먼저 적용해야 모든 창에 반영된다
         new TrayApp().start();
     }
 
@@ -79,7 +80,7 @@ public class TrayApp {
     private void start() {
         SwingUtilities.invokeLater(() -> {
             try {
-                icon = new TrayIcon(drawIcon(false), "ClipVault", buildMenu());
+                icon = new TrayIcon(Theme.appIcon(32, false), "ClipVault", buildMenu());
                 icon.setImageAutoSize(true);
                 // 아이콘 왼쪽 클릭 = 최근 클립 목록 (오른쪽 클릭은 메뉴)
                 icon.addMouseListener(new MouseAdapter() {
@@ -204,7 +205,7 @@ public class TrayApp {
             SwingUtilities.invokeLater(() -> {
                 unread = 0;
                 updateTooltip();
-                ClipListWindow.show(clips, text -> {
+                ClipListWindow.show(clips, session.deviceId, text -> {
                     // 순서가 중요: 먼저 EchoGuard에 기록한 뒤 클립보드에 쓴다.
                     // 그래야 감시기가 변화를 감지했을 때 "서버에서 받은 것"이라 업로드하지 않는다.
                     guard.markApplied(text);
@@ -280,31 +281,7 @@ public class TrayApp {
         String t = !loggedIn ? "ClipVault — 로그인 필요"
                 : "ClipVault" + (paused ? " (일시정지)" : "") + (unread > 0 ? " — 새 클립 " + unread + "개" : "");
         icon.setToolTip(t);
-        icon.setImage(drawIcon(unread > 0));
-    }
-
-    /**
-     * 트레이 아이콘 그림을 코드로 그린다 (별도 이미지 파일이 필요 없도록).
-     * 파란 클립보드 판 + 위쪽 집게 + 흰 "C" 글자. dot=true면 오른쪽 아래에 빨간 알림 점을 찍는다.
-     */
-    private static Image drawIcon(boolean dot) {
-        int s = 32;
-        BufferedImage img = new BufferedImage(s, s, BufferedImage.TYPE_INT_ARGB); // 투명 배경 32x32
-        Graphics2D g = img.createGraphics();
-        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON); // 가장자리 부드럽게
-        g.setColor(new Color(0x2B6CB0));
-        g.fillRoundRect(3, 5, 26, 26, 8, 8);            // 클립보드 판
-        g.setColor(new Color(0xE2E8F0));
-        g.fillRoundRect(10, 1, 12, 8, 4, 4);            // 위쪽 집게
-        g.setColor(Color.WHITE);
-        g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, 18));
-        g.drawString("C", 10, 26);
-        if (dot) {
-            g.setColor(new Color(0xE53E3E));
-            g.fillOval(20, 18, 12, 12);                 // 새 클립 알림 점
-        }
-        g.dispose();
-        return img;
+        icon.setImage(Theme.appIcon(32, unread > 0));
     }
 
     /**
