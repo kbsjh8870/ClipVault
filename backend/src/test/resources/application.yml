@@ -1,0 +1,21 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:clipvault;MODE=PostgreSQL;DB_CLOSE_DELAY=-1
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    open-in-view: false
+
+clipvault:
+  jwt:
+    secret: test-jwt-secret-that-is-at-least-32-bytes-long-0123456789
+    access-ttl: 15m
+    refresh-ttl: 30d
+  crypto:
+    # base64("0123456789abcdef0123456789abcdef") = 32 bytes
+    key: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+  clip:
+    ttl: 7d
+    cleanup-cron: "0 0 4 * * *"
