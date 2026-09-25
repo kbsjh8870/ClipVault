@@ -1,0 +1,5 @@
+# DOMAIN 환경변수의 주소로 HTTPS 인증서(Let's Encrypt)를 자동 발급·갱신하고,
+# 들어온 요청을 백엔드로 넘긴다. WebSocket(/ws) 업그레이드도 별도 설정 없이 그대로 전달된다.
+{$DOMAIN} {
+	reverse_proxy backend:8080
+}
