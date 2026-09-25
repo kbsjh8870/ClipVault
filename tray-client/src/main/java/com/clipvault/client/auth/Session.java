@@ -24,19 +24,19 @@ public class Session {
     public volatile String userId = PREFS.get("userId", null);
     /** 이 PC의 기기 ID. 알림 중 내가 올린 것(echo)을 거를 때 쓴다. */
     public volatile String deviceId = PREFS.get("deviceId", null);
-    /** 서버 주소. 예: http://localhost:8080 */
+    /** 서버 주소. 예: https://161-33-167-228.sslip.io (로컬 개발 시 http://localhost:8080) */
     public volatile String server = defaultServer();
 
     /**
      * 서버 주소를 정하는 우선순위:
      * ① 실행 옵션 {@code -Dclipvault.server=...} → ② 환경변수 {@code CLIPVAULT_SERVER}
-     * → ③ 지난번에 저장한 값 → ④ 기본값 {@code http://localhost:8080}.
+     * → ③ 지난번에 저장한 값 → ④ 기본값: 배포 서버 {@code https://161-33-167-228.sslip.io}.
      * 끝에 붙은 "/"는 떼어 낸다 (뒤에 "/api/..."를 붙일 때 "//"가 되지 않도록).
      */
     private static String defaultServer() {
         String s = System.getProperty("clipvault.server");
         if (s == null) s = System.getenv("CLIPVAULT_SERVER");
-        if (s == null) s = PREFS.get("server", "http://localhost:8080");
+        if (s == null) s = PREFS.get("server", "https://161-33-167-228.sslip.io");
         return s.endsWith("/") ? s.substring(0, s.length() - 1) : s;
     }
 
