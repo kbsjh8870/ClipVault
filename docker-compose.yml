@@ -1,0 +1,31 @@
+# Local dev only: PostgreSQL + backend.  docker compose up -d --build
+# Default secrets below are for local testing; production values come from the host's env/secret store.
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: clipvault
+      POSTGRES_USER: clipvault
+      POSTGRES_PASSWORD: clipvault
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clipvault"]
+      interval: 2s
+      retries: 30
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      DB_URL: jdbc:postgresql://db:5432/clipvault
+      DB_USERNAME: clipvault
+      DB_PASSWORD: clipvault
+      JWT_SECRET: ${JWT_SECRET:-local-dev-only-jwt-secret-change-me-32b}
+      CLIP_ENCRYPTION_KEY: ${CLIP_ENCRYPTION_KEY:-bG9jYWwtZGV2LW9ubHkta2V5LTMyLWJ5dGVzLSEhISE=}
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
