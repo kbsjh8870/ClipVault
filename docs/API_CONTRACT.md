@@ -29,7 +29,7 @@
 ## 2. 인증 모델
 
 - 토큰 2종 모두 JWT(HS256). claim: `sub`=userId(UUID), `did`=deviceId(UUID, 기기 등록 전엔 없음), `typ`=`access`|`refresh`.
-- 로그인 → **user 토큰**(did 없음). 이 토큰으로 할 수 있는 건 `POST /api/devices` 와 `GET /api/devices` 뿐.
+- 로그인 → **user accessToken**만 발급(did 없음, refresh 없음). 이 토큰으로 할 수 있는 건 `POST /api/devices` 와 `GET /api/devices` 뿐. 만료되면 다시 로그인.
 - `POST /api/devices` → **device 토큰**(did 포함) 발급. 이후 모든 API/WS는 device 토큰.
 - 모든 인증 요청마다 did가 있으면 해당 Device의 `active=true` 인지 확인한다 → 원격 로그아웃 즉시 반영.
 - refresh 토큰은 Device의 `refreshTokenHash`(SHA-256)에 저장, `/api/auth/refresh` 시 일치 확인 후 새 쌍 발급(rotation). 불일치/비활성 → 401.
@@ -43,7 +43,7 @@
 ### Auth
 - `POST /api/auth/signup` `{email, password}` → `201` `{id, email}`
   - email 형식 검증, password 8자 이상. 중복 → 409.
-- `POST /api/auth/login` `{email, password}` → `200` `{userId, accessToken, refreshToken}` (user 토큰). 실패 → 401.
+- `POST /api/auth/login` `{email, password}` → `200` `{userId, accessToken}` (user accessToken). 실패 → 401.
 - `POST /api/auth/refresh` `{refreshToken}` → `200` `{userId, accessToken, refreshToken}` (device refresh만 허용).
 
 ### Devices
@@ -73,6 +73,7 @@ ClipResponse = {id, content, contentHash, sourceDeviceId, createdAt, expiresAt}
 - SUBSCRIBE `/topic/clips/{userId}` — 본인 userId가 아니면 거부.
 - 클립 생성/갱신 시 서버가 해당 topic으로 ClipResponse JSON 전송.
 - 클라이언트는 `sourceDeviceId == 내 deviceId` 인 메시지를 무시(echo).
+- 기기가 원격 로그아웃(`DELETE /api/devices/{id}`)되면 서버가 그 기기의 열린 WebSocket 세션을 즉시 닫는다. 재연결 CONNECT는 401 사유로 거부된다.
 
 ## 5. 모듈 시그니처 (테스트가 직접 호출하므로 정확히 지킬 것)
 

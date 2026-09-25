@@ -43,6 +43,11 @@ public class JwtService {
         return new TokenPair(build(userId, deviceId, ACCESS, accessTtl), build(userId, deviceId, REFRESH, refreshTtl));
     }
 
+    /** User-scoped access token (no device). Only good for registering/listing devices; no refresh token. */
+    public String issueAccess(UUID userId) {
+        return build(userId, null, ACCESS, accessTtl);
+    }
+
     private String build(UUID userId, UUID deviceId, String type, Duration ttl) {
         Instant now = Instant.now();
         var builder = Jwts.builder()

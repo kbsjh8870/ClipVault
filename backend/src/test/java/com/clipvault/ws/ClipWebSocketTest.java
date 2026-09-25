@@ -115,6 +115,27 @@ class ClipWebSocketTest {
     }
 
     @Test
+    void remoteLogoutClosesThatDevicesOpenSocket() throws Exception {
+        String email = Api.uniqueEmail();
+        api.signup(email);
+        Api.Tokens user = api.login(email);
+        Api.DeviceTokens a = api.registerDevice(user, "A");
+        Api.DeviceTokens b = api.registerDevice(user, "B");
+
+        Recorder rec = new Recorder();
+        StompSession session = connect(a.accessToken(), rec).get(3, TimeUnit.SECONDS);
+        session.subscribe("/topic/clips/" + user.userId(), rec);
+        Thread.sleep(300);
+
+        api.delete("/api/devices/" + a.deviceId(), b.accessToken())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.status().isNoContent());
+        assertTrue(rec.error.await(3, TimeUnit.SECONDS), "logged-out device's socket should be closed");
+
+        api.createClip(b.accessToken(), "after logout", 201);
+        assertNull(rec.messages.poll(1, TimeUnit.SECONDS), "logged-out device must not receive pushes");
+    }
+
+    @Test
     void subscribingToAnotherUsersTopicIsRejected() throws Exception {
         Api.DeviceTokens attacker = api.newUserWithDevice();
         Api.DeviceTokens victim = api.newUserWithDevice();

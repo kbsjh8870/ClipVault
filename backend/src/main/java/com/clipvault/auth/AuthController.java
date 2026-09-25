@@ -34,6 +34,9 @@ public class AuthController {
     public record RefreshRequest(@NotBlank String refreshToken) {
     }
 
+    public record LoginResponse(UUID userId, String accessToken) {
+    }
+
     public record TokenResponse(UUID userId, String accessToken, String refreshToken) {
     }
 
@@ -60,12 +63,11 @@ public class AuthController {
     }
 
     @PostMapping("/login")
-    public TokenResponse login(@Valid @RequestBody LoginRequest req) {
+    public LoginResponse login(@Valid @RequestBody LoginRequest req) {
         User user = users.findByEmail(req.email())
                 .filter(u -> passwordEncoder.matches(req.password(), u.getPasswordHash()))
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid email or password"));
-        var pair = jwt.issue(user.getId(), null);
-        return new TokenResponse(user.getId(), pair.accessToken(), pair.refreshToken());
+        return new LoginResponse(user.getId(), jwt.issueAccess(user.getId()));
     }
 
     @PostMapping("/refresh")

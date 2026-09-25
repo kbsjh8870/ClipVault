@@ -59,7 +59,7 @@ class AuthApiTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.userId", notNullValue()))
                 .andExpect(jsonPath("$.accessToken", notNullValue()))
-                .andExpect(jsonPath("$.refreshToken", notNullValue()));
+                .andExpect(jsonPath("$.refreshToken").doesNotExist());
     }
 
     @Test
@@ -96,11 +96,11 @@ class AuthApiTest {
     }
 
     @Test
-    void userRefreshTokenIsRejected() throws Exception {
+    void accessTokenIsRejectedAsRefreshToken() throws Exception {
         String email = Api.uniqueEmail();
         api.signup(email);
         Api.Tokens user = api.login(email);
-        api.post("/api/auth/refresh", null, json("refreshToken", user.refreshToken()))
+        api.post("/api/auth/refresh", null, json("refreshToken", user.accessToken()))
                 .andExpect(status().isUnauthorized());
     }
 

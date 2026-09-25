@@ -38,6 +38,7 @@ public class StompAuthInterceptor implements ChannelInterceptor {
                     throw new MessageDeliveryException("Unauthorized: device access token required");
                 }
                 accessor.setUser(auth);
+                accessor.getSessionAttributes().put(DeviceSessions.DEVICE_ID, ((AuthUser) auth.getPrincipal()).deviceId());
             }
             case SUBSCRIBE -> {
                 if (!(accessor.getUser() instanceof UsernamePasswordAuthenticationToken auth)

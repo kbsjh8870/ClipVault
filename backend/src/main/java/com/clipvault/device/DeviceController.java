@@ -3,6 +3,7 @@ package com.clipvault.device;
 import com.clipvault.auth.AuthUser;
 import com.clipvault.auth.JwtService;
 import com.clipvault.common.HashUtil;
+import com.clipvault.websocket.DeviceSessions;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
@@ -41,10 +42,12 @@ public class DeviceController {
 
     private final DeviceRepository devices;
     private final JwtService jwt;
+    private final DeviceSessions deviceSessions;
 
-    public DeviceController(DeviceRepository devices, JwtService jwt) {
+    public DeviceController(DeviceRepository devices, JwtService jwt, DeviceSessions deviceSessions) {
         this.devices = devices;
         this.jwt = jwt;
+        this.deviceSessions = deviceSessions;
     }
 
     @PostMapping
@@ -70,5 +73,6 @@ public class DeviceController {
         devices.findByIdAndUserId(id, me.userId())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Device not found"))
                 .deactivate();
+        deviceSessions.closeDevice(id);
     }
 }

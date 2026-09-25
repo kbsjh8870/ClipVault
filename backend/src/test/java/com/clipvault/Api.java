@@ -14,7 +14,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 public class Api {
     public static final String PASSWORD = "password123";
 
-    public record Tokens(String userId, String accessToken, String refreshToken) {}
+    public record Tokens(String userId, String accessToken) {}
     public record DeviceTokens(String userId, String deviceId, String accessToken, String refreshToken) {}
 
     private final MockMvc mvc;
@@ -60,7 +60,7 @@ public class Api {
     public Tokens login(String email) throws Exception {
         String body = post("/api/auth/login", null, json("email", email, "password", PASSWORD))
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
-        return new Tokens(read(body, "$.userId"), read(body, "$.accessToken"), read(body, "$.refreshToken"));
+        return new Tokens(read(body, "$.userId"), read(body, "$.accessToken"));
     }
 
     public DeviceTokens registerDevice(Tokens user, String name) throws Exception {
