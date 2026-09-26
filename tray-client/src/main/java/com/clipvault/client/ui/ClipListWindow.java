@@ -28,15 +28,26 @@ public class ClipListWindow {
     private static final int WIDTH = 380;
 
     /**
+     * 썸네일 공급자. 캐시에 있으면 바로 돌려주고, 없으면 null을 돌려주면서 백그라운드로 받아 온 뒤 onReady를 부른다
+     * (onReady는 목록을 다시 그리게 한다).
+     */
+    @FunctionalInterface
+    public interface Thumbs {
+        Image get(String clipId, Runnable onReady);
+    }
+
+    /**
      * 팝업을 띄운다.
      *
      * @param clips      서버에서 받은 클립 목록(JSON 배열, 최신순)
      * @param myDeviceId 이 PC의 기기 ID ("이 PC"/"다른 기기" 표시용)
-     * @param onPick     사용자가 항목을 골랐을 때 호출 (선택한 텍스트 전달) - 로컬 클립보드에 넣는 일은 호출한 쪽이 한다
+     * @param onPick     사용자가 고른 클립(JSON 전체) - 텍스트/이미지에 따라 클립보드에 넣는 일은 호출한 쪽이 한다
      * @param onDelete   사용자가 항목을 삭제했을 때 호출 (삭제한 클립 전달) - 서버 삭제 요청은 호출한 쪽이 한다.
      *                   목록에서는 즉시 빠진다(서버 응답을 기다리지 않음)
+     * @param thumbs     이미지 클립의 썸네일을 가져오는 함수 (Task 10에서 렌더러에 연결)
      */
-    public static void show(JsonNode clips, String myDeviceId, Consumer<String> onPick, Consumer<JsonNode> onDelete) {
+    public static void show(JsonNode clips, String myDeviceId, Consumer<JsonNode> onPick, Consumer<JsonNode> onDelete,
+                             Thumbs thumbs) {
         if (open != null) open.dispose(); // 이미 떠 있던 팝업은 닫고 새로 띄운다
         DefaultListModel<JsonNode> model = new DefaultListModel<>();
         for (JsonNode c : clips) model.addElement(c);
@@ -58,7 +69,7 @@ public class ClipListWindow {
         Runnable pick = () -> {
             JsonNode c = list.getSelectedValue();
             d.dispose();
-            if (c != null) onPick.accept(c.path("content").asText());
+            if (c != null) onPick.accept(c);
         };
         JLabel count = Theme.pill(model.size() + "개", Theme.selected(), Theme.ACCENT);
         JPanel root = new JPanel(new BorderLayout());
