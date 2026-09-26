@@ -11,6 +11,8 @@ import com.clipvault.client.ui.ClipListWindow;
 import com.clipvault.client.ui.DeviceDialog;
 import com.clipvault.client.ui.Theme;
 import com.clipvault.client.update.Updater;
+import com.clipvault.client.hotkey.HotKeys;
+import com.clipvault.client.ui.HotKeyDialog;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import javax.swing.*;
@@ -75,13 +77,27 @@ public class TrayApp {
     private final ExecutorService bg = Executors.newVirtualThreadPerTaskExecutor();
     /** 새 버전 확인/설치 (exe로 실행할 때만 동작) */
     private final Updater updater = new Updater();
+    /** 전역 단축키 (Ctrl+Alt+Shift+C = 최근 클립, Ctrl+Alt+Shift+P = 일시정지). 등록 실패하면 알림만 띄운다. */
+    private final HotKeys hotKeys = new HotKeys(
+            java.util.Map.of(HotKeys.Action.CLIPS, this::showClips, HotKeys.Action.PAUSE, () -> setPaused(!this.paused)),
+            key -> SwingUtilities.invokeLater(() -> this.icon.displayMessage("ClipVault",
+                    "단축키 " + key + "는 다른 앱이 쓰고 있어 등록하지 못했습니다. 트레이 메뉴 > 단축키 설정에서 바꿔 주세요.",
+                    TrayIcon.MessageType.WARNING)));
 
     /** 작업표시줄 트레이 아이콘 */
     private TrayIcon icon;
-    /** 트레이 오른쪽 클릭 메뉴. 새 버전이 나오면 맨 위에 업데이트 항목을 끼워 넣는다. EDT에서만 접근. */
-    private PopupMenu menu;
+    /**
+     * 트레이 오른쪽 클릭 메뉴. 새 버전이 나오면 맨 위에 업데이트 항목을 끼워 넣는다. EDT에서만 접근.
+     * AWT 기본 메뉴(PopupMenu)는 단축키를 오른쪽에 정렬해 보여 주지 못하고 테마도 안 먹어서 Swing 메뉴를 쓴다.
+     */
+    private JPopupMenu menu;
+    /** Swing 메뉴는 창에 붙어야 뜰 수 있어서, 마우스 위치에 1px짜리 보이지 않는 창을 띄워 메뉴의 주인으로 쓴다. */
+    private JDialog menuOwner;
+    /** 단축키 표시를 갱신하려고 기억해 두는 항목들. EDT에서만 접근. */
+    private JMenuItem clipsItem;
+    private JCheckBoxMenuItem pauseItem;
     /** "업데이트 (v1.2.3)" 메뉴 항목. 새 버전이 없으면 null. EDT에서만 접근. */
-    private MenuItem updateItem;
+    private JMenuItem updateItem;
     /** 설치할 새 버전 정보. EDT에서만 접근. */
     private Updater.Release pending;
     /** 로그인(기기 등록) 되어 있는지 */
@@ -109,15 +125,21 @@ public class TrayApp {
         SwingUtilities.invokeLater(() -> {
             try {
                 menu = buildMenu();
-                icon = new TrayIcon(Theme.appIcon(32, false), "ClipVault", menu);
+                icon = new TrayIcon(Theme.appIcon(32, false), "ClipVault");
                 icon.setImageAutoSize(true);
-                // 아이콘 왼쪽 클릭 = 최근 클립 목록 (오른쪽 클릭은 메뉴)
+                // 아이콘 왼쪽 클릭 = 최근 클립 목록, 오른쪽 클릭 = 메뉴 (윈도우는 버튼을 뗄 때가 메뉴 시점)
                 icon.addMouseListener(new MouseAdapter() {
                     @Override public void mouseClicked(MouseEvent e) {
                         if (SwingUtilities.isLeftMouseButton(e)) showClips();
                     }
+
+                    @Override public void mouseReleased(MouseEvent e) {
+                        if (e.isPopupTrigger()) showMenu();
+                    }
                 });
                 SystemTray.getSystemTray().add(icon);
+                hotKeys.apply();
+                refreshMenuLabels();
             } catch (AWTException e) {
                 throw new IllegalStateException(e);
             }
@@ -150,35 +172,79 @@ public class TrayApp {
         }
     }
 
-    /** 트레이 아이콘 오른쪽 클릭 메뉴를 만든다. */
-    private PopupMenu buildMenu() {
-        PopupMenu menu = new PopupMenu();
-        MenuItem clips = new MenuItem("최근 클립");
+    /** 트레이 아이콘 오른쪽 클릭 메뉴를 만든다. 단축키는 {@link #refreshMenuLabels}가 항목 오른쪽에 표시한다. */
+    private JPopupMenu buildMenu() {
+        JPopupMenu menu = new JPopupMenu();
+        JMenuItem clips = clipsItem = new JMenuItem("최근 클립");
         clips.addActionListener(e -> showClips());
-        MenuItem devices = new MenuItem("기기 관리");
+        JMenuItem devices = new JMenuItem("기기 관리");
         devices.addActionListener(e -> {
             if (!loggedIn) { showLogin(); return; }
             DeviceDialog.show(api, session.deviceId, this::localLogout);
         });
-        CheckboxMenuItem pause = new CheckboxMenuItem("일시정지");
-        pause.setState(paused); // 지난번 상태 복원
-        pause.addItemListener(e -> {
-            paused = pause.getState();
-            session.paused = paused;
-            session.save(); // 앱을 다시 켜도 유지되도록 저장
-            updateTooltip();
-        });
-        MenuItem logout = new MenuItem("로그아웃");
+        JCheckBoxMenuItem pause = pauseItem = new JCheckBoxMenuItem("일시정지", paused); // 지난번 상태 복원
+        pause.addActionListener(e -> setPaused(pause.isSelected()));
+        JMenuItem keys = new JMenuItem("단축키 설정…");
+        keys.addActionListener(e -> HotKeyDialog.show(hotKeys, this::refreshMenuLabels));
+        // 현재 버전 (누를 수 없는 회색 항목). IDE에서 실행하면 버전 정보가 없다.
+        JMenuItem version = new JMenuItem("ClipVault " + (updater.current == null ? "(개발)" : "v" + updater.current));
+        version.setEnabled(false);
+        JMenuItem logout = new JMenuItem("로그아웃");
         logout.addActionListener(e -> logout());
-        MenuItem quit = new MenuItem("종료");
+        JMenuItem quit = new JMenuItem("종료");
         quit.addActionListener(e -> quit());
         menu.add(clips);
         menu.add(devices);
         menu.add(pause);
+        menu.add(keys);
         menu.addSeparator();
         menu.add(logout);
+        menu.add(version);
         menu.add(quit);
         return menu;
+    }
+
+    /** (EDT) 마우스 위치(트레이 아이콘)에 메뉴를 띄운다. 작업표시줄 위로 올라가도록 메뉴 높이만큼 위에 띄운다. */
+    private void showMenu() {
+        if (menuOwner == null) {
+            menuOwner = new JDialog((Frame) null);
+            menuOwner.setUndecorated(true);
+            menuOwner.setType(Window.Type.UTILITY); // 작업표시줄에 창으로 나타나지 않게
+            menuOwner.setAlwaysOnTop(true);
+            menuOwner.setSize(1, 1);
+            // 메뉴가 닫히면 주인 창도 숨기고, 다른 곳을 클릭해 주인 창이 포커스를 잃으면 메뉴를 닫는다
+            menu.addPopupMenuListener(new javax.swing.event.PopupMenuListener() {
+                @Override public void popupMenuWillBecomeVisible(javax.swing.event.PopupMenuEvent e) { }
+                @Override public void popupMenuWillBecomeInvisible(javax.swing.event.PopupMenuEvent e) { menuOwner.setVisible(false); }
+                @Override public void popupMenuCanceled(javax.swing.event.PopupMenuEvent e) { }
+            });
+            menuOwner.addWindowFocusListener(new java.awt.event.WindowAdapter() {
+                @Override public void windowLostFocus(java.awt.event.WindowEvent e) { menu.setVisible(false); }
+            });
+        }
+        Point p = MouseInfo.getPointerInfo() != null ? MouseInfo.getPointerInfo().getLocation() : new Point(0, 0);
+        menuOwner.setLocation(p);
+        menuOwner.setVisible(true);
+        menuOwner.toFront();
+        menu.show(menuOwner, 0, -menu.getPreferredSize().height);
+    }
+
+    /** (EDT) 일시정지 켜기/끄기. 메뉴와 단축키가 함께 쓴다. 단축키로 바꿨을 땐 화면에 보이는 게 없으니 알림으로 알려 준다. */
+    private void setPaused(boolean value) {
+        boolean fromHotKey = pauseItem.isSelected() != value;
+        paused = value;
+        pauseItem.setSelected(value);
+        session.paused = value;
+        session.save(); // 앱을 다시 켜도 유지되도록 저장
+        updateTooltip();
+        if (fromHotKey) icon.displayMessage("ClipVault", value ? "일시정지: 복사해도 동기화하지 않습니다." : "동기화를 다시 시작합니다.",
+                TrayIcon.MessageType.INFO);
+    }
+
+    /** (EDT) 지정된 단축키를 메뉴 항목 오른쪽에 회색으로 표시한다 (Swing 메뉴의 accelerator 표시). */
+    private void refreshMenuLabels() {
+        clipsItem.setAccelerator(HotKeys.get(HotKeys.Action.CLIPS));
+        pauseItem.setAccelerator(HotKeys.get(HotKeys.Action.PAUSE));
     }
 
     /** 앱 종료: 실시간 연결을 끊고 트레이 아이콘을 치운다. */
@@ -195,12 +261,12 @@ public class TrayApp {
         if (pending != null && pending.version().equals(r.version())) return;
         pending = r;
         if (updateItem == null) {
-            updateItem = new MenuItem();
+            updateItem = new JMenuItem();
             updateItem.addActionListener(e -> installUpdate());
             menu.insert(updateItem, 0);
-            menu.insertSeparator(1);
+            menu.insert(new JPopupMenu.Separator(), 1);
         }
-        updateItem.setLabel("업데이트 (v" + r.version() + ")");
+        updateItem.setText("업데이트 (v" + r.version() + ")");
         icon.displayMessage("새 버전", "ClipVault v" + r.version() + "이 나왔습니다. 트레이 메뉴에서 업데이트하세요.",
                 TrayIcon.MessageType.INFO);
     }

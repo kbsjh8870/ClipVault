@@ -15,6 +15,8 @@ repositories {
 dependencies {
 	implementation 'com.fasterxml.jackson.core:jackson-databind:2.21.4'
 	implementation 'com.formdev:flatlaf:3.7.2'
+	// 전역 단축키: 윈도우 RegisterHotKey 호출용 (자바 기본 기능으로는 앱 밖의 키 입력을 받을 수 없다)
+	implementation 'net.java.dev.jna:jna-platform:5.17.0'
 	testImplementation platform('org.junit:junit-bom:5.12.2')
 	testImplementation 'org.junit.jupiter:junit-jupiter'
 	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
