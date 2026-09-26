@@ -9,6 +9,7 @@ import com.clipvault.client.network.ClipSocket;
 import com.clipvault.client.ui.ClipListWindow;
 import com.clipvault.client.ui.DeviceDialog;
 import com.clipvault.client.ui.Theme;
+import com.clipvault.client.update.Updater;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import javax.swing.*;
@@ -31,6 +32,7 @@ import java.util.concurrent.Executors;
  *   <li>{@link ClipboardWatcher}: 로컬 Ctrl+C 감지 → {@link #onLocalCopy}</li>
  *   <li>{@link EchoGuard}: 업로드해도 되는지 판단 (서버에서 받은 걸 되돌려 보내지 않기)</li>
  *   <li>{@link ClipSocket}: 서버 실시간 알림 수신 → {@link #onPush}, 재연결 시 {@link #onConnected}</li>
+ *   <li>{@link Updater}: 하루에 한 번 새 버전 확인 → 메뉴에 "업데이트" 항목 표시</li>
  * </ul>
  *
  * <p><b>스레드 규칙</b> (Swing 프로그램의 기본 규칙)</p>
@@ -53,9 +55,17 @@ public class TrayApp {
             () -> SwingUtilities.invokeLater(this::localLogout));
     /** 네트워크 작업용 스레드 풀. 자바 21 가상 스레드: 작업마다 가벼운 스레드를 새로 만들어 쓴다. */
     private final ExecutorService bg = Executors.newVirtualThreadPerTaskExecutor();
+    /** 새 버전 확인/설치 (exe로 실행할 때만 동작) */
+    private final Updater updater = new Updater();
 
     /** 작업표시줄 트레이 아이콘 */
     private TrayIcon icon;
+    /** 트레이 오른쪽 클릭 메뉴. 새 버전이 나오면 맨 위에 업데이트 항목을 끼워 넣는다. EDT에서만 접근. */
+    private PopupMenu menu;
+    /** "업데이트 (v1.2.3)" 메뉴 항목. 새 버전이 없으면 null. EDT에서만 접근. */
+    private MenuItem updateItem;
+    /** 설치할 새 버전 정보. EDT에서만 접근. */
+    private Updater.Release pending;
     /** 로그인(기기 등록) 되어 있는지 */
     private volatile boolean loggedIn;
     /** "일시정지" 메뉴가 켜져 있으면 복사해도 업로드하지 않는다 (비밀번호 복사 등 민감할 때 사용). 저장된 값으로 시작한다. */
@@ -80,7 +90,8 @@ public class TrayApp {
     private void start() {
         SwingUtilities.invokeLater(() -> {
             try {
-                icon = new TrayIcon(Theme.appIcon(32, false), "ClipVault", buildMenu());
+                menu = buildMenu();
+                icon = new TrayIcon(Theme.appIcon(32, false), "ClipVault", menu);
                 icon.setImageAutoSize(true);
                 // 아이콘 왼쪽 클릭 = 최근 클립 목록 (오른쪽 클릭은 메뉴)
                 icon.addMouseListener(new MouseAdapter() {
@@ -105,6 +116,20 @@ public class TrayApp {
             }
             if (ok) onLoggedIn(); else SwingUtilities.invokeLater(this::showLogin);
         });
+        if (updater.enabled()) {
+            // 켜질 때 한 번, 그 뒤로 24시간마다 새 버전 확인
+            Thread.ofVirtual().start(() -> {
+                while (true) {
+                    Updater.Release r = updater.check();
+                    if (r != null) SwingUtilities.invokeLater(() -> offerUpdate(r));
+                    try {
+                        Thread.sleep(Duration.ofHours(24));
+                    } catch (InterruptedException e) {
+                        return;
+                    }
+                }
+            });
+        }
     }
 
     /** 트레이 아이콘 오른쪽 클릭 메뉴를 만든다. */
@@ -128,11 +153,7 @@ public class TrayApp {
         MenuItem logout = new MenuItem("로그아웃");
         logout.addActionListener(e -> logout());
         MenuItem quit = new MenuItem("종료");
-        quit.addActionListener(e -> {
-            socket.stop();
-            SystemTray.getSystemTray().remove(icon);
-            System.exit(0);
-        });
+        quit.addActionListener(e -> quit());
         menu.add(clips);
         menu.add(devices);
         menu.add(pause);
@@ -140,6 +161,67 @@ public class TrayApp {
         menu.add(logout);
         menu.add(quit);
         return menu;
+    }
+
+    /** 앱 종료: 실시간 연결을 끊고 트레이 아이콘을 치운다. */
+    private void quit() {
+        socket.stop();
+        SystemTray.getSystemTray().remove(icon);
+        System.exit(0);
+    }
+
+    // --- 업데이트 ---
+
+    /** (EDT) 새 버전 발견: 메뉴 맨 위에 업데이트 항목을 넣고 알림을 띄운다. 같은 버전은 한 번만 알린다. */
+    private void offerUpdate(Updater.Release r) {
+        if (pending != null && pending.version().equals(r.version())) return;
+        pending = r;
+        if (updateItem == null) {
+            updateItem = new MenuItem();
+            updateItem.addActionListener(e -> installUpdate());
+            menu.insert(updateItem, 0);
+            menu.insertSeparator(1);
+        }
+        updateItem.setLabel("업데이트 (v" + r.version() + ")");
+        icon.displayMessage("새 버전", "ClipVault v" + r.version() + "이 나왔습니다. 트레이 메뉴에서 업데이트하세요.",
+                TrayIcon.MessageType.INFO);
+    }
+
+    /**
+     * (EDT) 메뉴의 "업데이트" 클릭. 확인을 받은 뒤 새 버전을 받아 설치하고 앱을 종료한다 (교체 스크립트가 다시 켠다).
+     * 앱 폴더에 쓰기 권한이 없으면(Program Files 등) 릴리스 페이지를 열어 직접 받게 한다.
+     */
+    private void installUpdate() {
+        Updater.Release r = pending;
+        if (r == null) return;
+        if (!updater.canReplace()) {
+            try {
+                Desktop.getDesktop().browse(r.page());
+            } catch (Exception e) {
+                System.err.println("Cannot open browser: " + e);
+            }
+            return;
+        }
+        int ok = JOptionPane.showConfirmDialog(null,
+                "ClipVault v" + r.version() + "으로 업데이트할까요?\n앱이 재시작됩니다.",
+                "업데이트", JOptionPane.OK_CANCEL_OPTION, JOptionPane.QUESTION_MESSAGE, new ImageIcon(Theme.appIcon(48, false)));
+        if (ok != JOptionPane.OK_OPTION) return;
+        updateItem.setEnabled(false); // 다운로드 중 중복 클릭 방지
+        icon.setToolTip("ClipVault — 업데이트 다운로드 중…");
+        bg.execute(() -> {
+            try {
+                updater.install(r);
+                SwingUtilities.invokeLater(this::quit); // 스크립트가 종료를 기다렸다가 교체 후 다시 켠다
+            } catch (Exception e) {
+                System.err.println("Update failed: " + e);
+                SwingUtilities.invokeLater(() -> {
+                    updateItem.setEnabled(true);
+                    updateTooltip();
+                    icon.displayMessage("업데이트 실패", "잠시 후 다시 시도해 주세요. (" + e.getMessage() + ")",
+                            TrayIcon.MessageType.ERROR);
+                });
+            }
+        });
     }
 
     // --- 로그인 / 로그아웃 ---
