@@ -49,7 +49,7 @@ public class TrayApp {
     private final ApiClient api = new ApiClient(session);
     /** 서버에서 받아 로컬에 넣은 텍스트는 5초 동안 다시 업로드하지 않는다. */
     private final EchoGuard guard = new EchoGuard(Clock.systemUTC(), Duration.ofSeconds(5));
-    private final ClipboardWatcher watcher = new ClipboardWatcher(this::onLocalCopy);
+    private final ClipboardWatcher watcher = new ClipboardWatcher(this::onLocalCopy, (img, key) -> { });
     /** 인증을 잃으면(토큰 갱신 실패) 화면 스레드에서 로그아웃 처리 → 로그인 창 */
     private final ClipSocket socket = new ClipSocket(session, api, this::onPush, this::onConnected,
             () -> SwingUtilities.invokeLater(this::localLogout));
