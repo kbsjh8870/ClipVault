@@ -1,22 +1,22 @@
 # ClipVault — TRD (Technical Requirements Document)
 
-- 문서 버전: v0.2
-- 작성일: 2026-09-25 (최초) / 수정: 2026-09-25
-- 관련 문서: PRD.md, TASKS.md
+- 문서 버전: v0.3
+- 작성일: 2026-09-25 (최초) / 수정: 2026-09-26 (v1.0.1 구현 기준으로 기술 스택·API·배포 현행화)
+- 관련 문서: PRD.md, TASKS.md, API_CONTRACT.md (API 상세 명세의 기준 문서)
 
 ## 1. 아키텍처 개요
 
 ```
-[Windows 트레이 앱 A] <--REST/WS--> [Spring Boot 백엔드] <--REST/WS--> [Windows 트레이 앱 B]
-                                        |
-                                     [PostgreSQL]
+[Windows 트레이 앱 A] <--HTTPS/WSS--> [Caddy] --> [Spring Boot 백엔드] <-- ... --> [Windows 트레이 앱 B]
+                                       (Oracle Cloud VM, Docker)   |
+                                                              [PostgreSQL (Neon)]
 ```
 
 - 클라이언트(트레이 앱)는 로컬 클립보드 변경을 감지해 REST API로 서버에 업로드한다.
 - 서버는 저장 후 같은 사용자의 다른 활성 기기에 WebSocket(STOMP)으로 새 클립 도착을 push한다.
 - 클라이언트는 알림을 받으면 UI(트레이 아이콘/목록)만 갱신하고, 사용자가 항목을 클릭했을 때 로컬 클립보드에 반영한다.
 
-이 프로젝트는 별도의 SPA/정적 프론트엔드 없이 "백엔드 API 서버 + 데스크톱 트레이 클라이언트" 2개 컴포넌트로만 구성된다는 점이 일반적인 웹 서비스 구조와 다르다. 이 차이는 배포 방법(6장)에도 영향을 준다.
+이 프로젝트는 별도의 SPA/정적 프론트엔드 없이 "백엔드 API 서버 + 데스크톱 트레이 클라이언트" 2개 컴포넌트로만 구성된다는 점이 일반적인 웹 서비스 구조와 다르다. 이 차이는 배포 방법(8장)에도 영향을 준다.
 
 ## 2. 기술 스택 및 선택 이유
 
@@ -27,18 +27,24 @@
 | 실시간 통신 | Spring WebSocket (STOMP) | Spring 생태계에 내장되어 있어 별도 인프라(Redis Pub/Sub 등) 없이 시작 가능하고, topic 기반 pub/sub 구조가 "한 사용자의 여러 기기에 동시 브로드캐스트"하는 요구사항과 잘 맞음 |
 | ORM | Spring Data JPA | Spring Boot와 통합이 쉽고, 엔티티 3종(User/Device/Clip) 수준의 단순한 관계형 모델에 적합 |
 | DB | PostgreSQL | 관계형 구조(User-Device-Clip)가 명확하고, Supabase/Neon 등 무료 티어 선택지가 풍부해 예산 최소화 목표에 부합 |
-| 클라이언트(데스크톱) | Java (Swing 트레이 아이콘) | 백엔드와 동일 언어로 개발해 새 스택을 익힐 필요가 없고, `java.awt.Toolkit`의 클립보드 API가 OS 종속적이지 않아 추후 macOS 확장 시 재사용 가능성이 높음 |
-| 배포(백엔드) | Fly.io 또는 Railway | 상시 구동되는 서버(WebSocket 유지 포함)를 무료/저비용으로 운영 가능하고 Docker 기반 배포가 간단함 |
-| 배포(DB) | Supabase 또는 Neon | 관리형 PostgreSQL을 무료 티어로 제공하며, 별도 DB 서버 운영 부담이 없음 |
+| 클라이언트(데스크톱) | Java 21 (Swing/AWT SystemTray) + FlatLaf | 백엔드와 동일 언어로 개발해 새 스택을 익힐 필요가 없고, `java.awt.Toolkit`의 클립보드 API가 OS 종속적이지 않아 추후 macOS 확장 시 재사용 가능성이 높음. FlatLaf로 윈도우 다크/라이트 모드를 따르는 모던 UI |
+| 클라이언트 통신 | `java.net.http` (HttpClient, WebSocket) + STOMP 직접 구현 | 외부 라이브러리 없이 JDK 기본 기능으로 REST/WebSocket 처리. STOMP는 필요한 프레임(CONNECT/SUBSCRIBE/MESSAGE/ERROR)만 구현 |
+| 배포(백엔드) | Oracle Cloud Always Free VM (ARM) + Docker Compose + Caddy | WebSocket을 상시 유지해야 해서 잠드는 무료 호스팅(Render 등)은 부적합, Fly.io/Railway는 유료. Always Free VM은 영구 무료이면서 항상 켜져 있음. Caddy가 HTTPS 인증서를 자동 발급 |
+| 배포(DB) | Neon | 관리형 PostgreSQL을 무료 티어로 제공하며, 별도 DB 서버 운영 부담이 없음 |
+| 배포(클라이언트) | jpackage 포터블 zip + GitHub Releases | Java 런타임을 포함해 사용자 PC에 JDK가 없어도 실행 |
+| CI/CD | GitHub Actions | 테스트, 태그 기반 릴리스(exe 빌드), VM 자동 배포 |
 
 ## 3. 폴더 구조
 
 ```
 clipvault/
+├── .github/workflows/      # ci.yml, release.yml, deploy.yml
 ├── docs/
 │   ├── PRD.md
 │   ├── TRD.md
-│   └── TASKS.md
+│   ├── TASKS.md
+│   ├── API_CONTRACT.md     # API/모듈 상세 명세 (팀 공통 기준)
+│   └── images/             # README 스크린샷
 ├── backend/
 │   ├── src/main/java/com/clipvault/
 │   │   ├── auth/           # 회원가입/로그인, JWT 발급/검증
@@ -50,14 +56,19 @@ clipvault/
 │   ├── src/main/resources/
 │   │   └── application.yml
 │   ├── src/test/java/com/clipvault/
+│   ├── Dockerfile
 │   └── build.gradle
 ├── tray-client/
 │   ├── src/main/java/com/clipvault/client/
-│   │   ├── clipboard/      # ClipboardListener (java.awt.Toolkit 기반)
-│   │   ├── network/        # REST 클라이언트, WebSocket 클라이언트
-│   │   ├── ui/             # 트레이 아이콘, 목록 팝업, 로그인 다이얼로그
-│   │   └── auth/           # 로그인 상태/토큰 저장
-│   └── build.gradle
+│   │   ├── clipboard/      # ClipboardWatcher, EchoGuard(재업로드 방지)
+│   │   ├── network/        # ApiClient(REST), ClipSocket(WebSocket), StompFrame
+│   │   ├── ui/             # Theme, 클립 목록 팝업, 기기 관리 창
+│   │   └── auth/           # 로그인 창, Session(토큰/설정 저장)
+│   ├── packaging/          # ClipVault.ico
+│   └── build.gradle        # packageApp/packageZip (jpackage)
+├── deploy/                 # 운영용 docker-compose.prod.yml, Caddyfile, .env.example
+├── docker-compose.yml      # 로컬 개발용 (PostgreSQL + backend)
+├── settings.gradle         # Gradle 멀티프로젝트
 └── README.md
 ```
 
@@ -78,8 +89,9 @@ clipvault/
 | user_id | FK -> User | |
 | device_name | varchar | 사용자 지정 가능 (예: "회사PC") |
 | os | varchar | 자동 감지 |
-| last_seen_at | timestamp | 마지막 접속 시각 |
+| last_seen_at | timestamp | 마지막 접속 시각 (1분 단위로 갱신) |
 | is_active | boolean | 로그아웃된 기기 구분 |
+| refresh_token_hash | varchar | 현재 유효한 refresh 토큰의 SHA-256 (rotation, 로그아웃 시 null) |
 
 ### Clip
 | 필드 | 타입 | 설명 |
@@ -94,33 +106,40 @@ clipvault/
 
 관계: `User 1—N Device`, `User 1—N Clip`, `Device 1—N Clip(source)`
 
-## 5. API 명세 (초안)
+구현 메모: FK 제약 대신 UUID 컬럼으로 참조한다. 기기는 삭제하지 않고 비활성화만 하므로 클립이 없는 기기를 가리키는 일은 없다. 스키마는 JPA `ddl-auto: update`로 생성한다(Flyway 미사용).
+
+## 5. API 명세
+
+요청/응답 필드, 에러 코드, 토큰 규칙의 상세는 [API_CONTRACT.md](API_CONTRACT.md)가 기준이다. 여기에는 요약만 적는다.
 
 ### 5.1 인증
 - `POST /api/auth/signup` — { email, password } → 201
-- `POST /api/auth/login` — { email, password } → { accessToken, refreshToken }
+- `POST /api/auth/login` — { email, password } → { userId, accessToken } (기기 등록 전용 user 토큰, refresh 없음)
+- `POST /api/auth/refresh` — { refreshToken } → 새 토큰 쌍 (refresh 토큰도 매번 교체)
 
 ### 5.2 기기
-- `POST /api/devices` — { deviceName, os } → 기기 등록, 인증 필요
+- `POST /api/devices` — { deviceName, os } → 기기 등록 + 기기 전용 토큰 쌍(access/refresh) 발급
 - `GET /api/devices` — 내 기기 목록 조회
-- `DELETE /api/devices/{deviceId}` — 원격 로그아웃
+- `DELETE /api/devices/{deviceId}` — 원격 로그아웃 (토큰 무효화 + 열린 WebSocket 즉시 종료)
 
 ### 5.3 클립
-- `POST /api/clips` — { content } → 클립 업로드 (source_device는 인증 컨텍스트에서 식별)
+- `POST /api/clips` — { content } → 신규 201 / 직전 클립과 같은 내용이면 200 (source_device는 인증 컨텍스트에서 식별)
 - `GET /api/clips?limit=20` — 최근 클립 목록 조회
 - `DELETE /api/clips/{clipId}` — 개별 삭제
 
 ### 5.4 실시간(WebSocket, STOMP)
 - 연결: `WS /ws` (JWT를 CONNECT 헤더로 인증)
-- 구독: `/topic/clips/{userId}` — 새 클립 도착 시 서버가 payload push
+- 구독: `/topic/clips/{userId}` — 새 클립 도착 시 서버가 payload push (본인 topic만 구독 가능, 클라이언트 SEND 금지)
 - 클라이언트는 자신이 업로드한 클립의 echo를 무시하도록 source_device_id로 필터링
 
 ## 6. 핵심 로직 설계
 
 ### 6.1 클립보드 감지 (트레이 앱)
 - `java.awt.Toolkit.getDefaultToolkit().getSystemClipboard()`에 `FlavorListener` 등록
+- FlavorListener는 데이터 종류가 바뀔 때만 호출되므로(텍스트→텍스트 복사는 감지 못 함) 1초 간격 폴링을 함께 사용
 - 텍스트(`DataFlavor.stringFlavor`)만 우선 처리, 이미지/파일은 무시
-- 자기 자신이 방금 반영한 클립(서버에서 받아 로컬에 붙여넣은 경우)이 다시 캡처되어 무한 루프로 재업로드되지 않도록, 직전에 반영한 content_hash는 짧은 시간 동안 업로드 대상에서 제외
+- 자기 자신이 방금 반영한 클립(서버에서 받아 로컬에 붙여넣은 경우)이 다시 캡처되어 무한 루프로 재업로드되지 않도록, 서버에서 받아 반영한 텍스트는 5초 동안 업로드 대상에서 제외(`EchoGuard`). 직전에 업로드한 텍스트와 같아도 제외
+- "일시정지" 중에는 업로드하지 않음 (상태는 재시작 후에도 유지)
 
 ### 6.2 중복 방지
 - 클립 업로드 시 content의 해시(SHA-256 등)를 계산
@@ -132,9 +151,10 @@ clipvault/
 
 ### 6.4 보안
 - 비밀번호: bcrypt 해시 저장
-- 클립 내용: 서버 저장 시 대칭키(AES) 암호화. 키는 환경변수/시크릿 매니저로 관리 (v1은 단일 서버 키, 향후 사용자별 키 파생 검토)
-- 통신: 전 구간 HTTPS/WSS
-- JWT: accessToken 단기 만료 + refreshToken 로테이션
+- 클립 내용: 서버 저장 시 AES-256-GCM 암호화(매번 랜덤 IV, 위변조 감지). 키는 환경변수로 관리 (v1은 단일 서버 키, 향후 사용자별 키 파생 검토)
+- 통신: 전 구간 HTTPS/WSS (Caddy가 Let's Encrypt 인증서 자동 발급/갱신)
+- JWT(HS256): accessToken 15분 + refreshToken 30일 로테이션. 로그인 토큰(user)과 기기 토큰(device) 분리
+- 원격 로그아웃: 요청마다 기기 활성 여부를 확인해 즉시 반영, 열린 WebSocket 세션도 서버가 종료
 
 ## 7. 외부 API/서비스 의존성
 
@@ -142,38 +162,53 @@ clipvault/
 
 | 구분 | 의존 대상 | 용도 | 비고 |
 |---|---|---|---|
-| 인프라 | Fly.io 또는 Railway | 백엔드 서버 호스팅 | 무료 티어 사용, WebSocket 상시 연결 지원 확인 필요 |
-| 인프라 | Supabase 또는 Neon | 관리형 PostgreSQL | 무료 티어, 커넥션 제한 확인 필요 |
+| 인프라 | Oracle Cloud Always Free (VM.Standard.A1.Flex) | 백엔드 서버 호스팅 | 영구 무료, 항상 켜짐 |
+| 인프라 | Neon | 관리형 PostgreSQL | 무료 티어. 유휴 시 잠들어 첫 요청이 1~2초 느림 |
+| 인프라 | sslip.io | IP 기반 도메인 (`161-33-167-228.sslip.io`) | 도메인 구매 없이 HTTPS 인증서 발급용 |
+| 인프라 | Caddy (Docker 이미지) | HTTPS 종료 + 리버스 프록시 | Let's Encrypt 자동 인증서, WebSocket 전달 |
 | 라이브러리 | Spring Boot Starter (Web, Security, WebSocket, Data JPA) | 백엔드 핵심 프레임워크 | |
-| 라이브러리 | JJWT (또는 Nimbus JOSE) | JWT 발급/검증 | |
+| 라이브러리 | JJWT 0.12 | JWT 발급/검증 | |
 | 라이브러리 | Spring Security 내장 BCryptPasswordEncoder | 비밀번호 해시 | 별도 서비스 불필요 |
-| 라이브러리 | Java-WebSocket 또는 Spring WebSocket Client | 트레이 앱의 서버 실시간 연결 | |
+| 라이브러리 | JDK `java.net.http` | 트레이 앱의 REST/WebSocket 통신 | 외부 라이브러리 없음 |
+| 라이브러리 | Jackson Databind | 트레이 앱 JSON 처리 | |
+| 라이브러리 | FlatLaf 3.7 | 트레이 앱 UI 테마 | |
 | (선택, v1 제외 가능) | 이메일 발송 서비스 | 회원가입 인증 메일 | v1은 이메일 인증 없이 즉시 가입 처리, 필요 시 추후 추가 |
 
 ## 8. 배포 방법
 
 ### 8.1 백엔드(API 서버)
-- Fly.io 또는 Railway에 Docker 컨테이너로 배포
-- Vercel, Cloudflare Pages는 정적 사이트/서버리스 함수에 최적화된 플랫폼이라, WebSocket 연결을 상시 유지해야 하는 Spring Boot 서버(장시간 구동 프로세스)에는 적합하지 않다. 따라서 이 프로젝트의 백엔드는 Fly.io/Railway처럼 컨테이너를 상시 구동할 수 있는 플랫폼을 사용한다.
-- 환경변수로 DB 접속 정보, JWT 시크릿, 클립 암호화 키를 주입
+- Oracle Cloud Always Free VM(ARM, Ubuntu)에서 `deploy/docker-compose.prod.yml`로 백엔드 + Caddy 컨테이너 실행
+- 서버 주소: `https://161-33-167-228.sslip.io` (sslip.io로 공인 IP를 도메인처럼 사용, Caddy가 HTTPS 인증서 자동 발급)
+- DB는 외부 관리형 PostgreSQL(Neon)을 사용하므로 VM에는 DB 컨테이너가 없음
+- 환경변수(`DOMAIN`, DB 접속 정보, `JWT_SECRET`, `CLIP_ENCRYPTION_KEY`)는 VM의 `deploy/.env`에 두고 git에는 올리지 않음
+- 서버 VM 방화벽(Oracle Security List + VM iptables)에서 80/443 허용 필요 (80은 인증서 발급용)
+- 선정 과정: Vercel/Cloudflare Pages는 상시 구동 서버에 부적합, Render/Koyeb 무료 티어는 유휴 시 잠들어 WebSocket 알림이 지연, Fly.io/Railway는 유료 → 영구 무료이면서 항상 켜져 있는 Oracle VM 선택
 
 ### 8.2 프론트엔드(정적 사이트) — 현재 범위에는 없음
 - v1은 별도의 웹 프론트엔드/랜딩페이지가 없다. 만약 향후 소개용 랜딩페이지나 모바일 웹(PWA) 대시보드를 추가한다면, 그 정적 리소스는 Vercel 또는 Cloudflare Pages에 배포하는 것이 적합하다(무료 티어, 자동 배포, CDN 제공). 이는 PRD의 향후 로드맵(모바일 PWA) 항목과 연결되는 백로그다.
 
 ### 8.3 데스크톱 클라이언트(트레이 앱)
-- jpackage로 실행 가능한 배포 산출물(jar 또는 OS별 실행 파일) 생성
-- GitHub Releases를 통한 다운로드 배포, 또는 별도 다운로드 페이지 운영
+- `./gradlew :tray-client:packageZip` → jpackage로 Java 런타임을 포함한 포터블 폴더(`ClipVault.exe`)를 만들고 zip으로 압축
+- GitHub Releases로 배포. 고정 다운로드 링크: `https://github.com/kbsjh8870/ClipVault/releases/latest/download/ClipVault-windows.zip`
+- 기본 서버 주소는 배포 서버. 로그인 창의 "서버 설정"에서 변경 가능
+- 코드 서명이 없어 첫 실행 시 SmartScreen 경고가 뜸 (추가 정보 → 실행)
 
-### 8.4 CI/CD (백로그)
-- GitHub Actions로 백엔드 빌드/테스트/배포 자동화 검토
+### 8.4 CI/CD (GitHub Actions)
+- `ci.yml`: 모든 push/PR에서 전체 테스트
+- `release.yml`: `v*` 태그 푸시 시 Windows 러너에서 exe 빌드 후 GitHub 릴리스 생성 (앱 버전은 태그에서 추출)
+- `deploy.yml`: main의 `backend/`, `deploy/`, Gradle 설정 변경 시 백엔드 테스트 후 VM에 SSH 접속해 `git reset --hard origin/main` + `docker compose up -d --build`, 이후 외부 헬스 체크(401 응답 확인). SSH 정보는 GitHub Secrets(`DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`)
 
 ## 9. 리스크 및 미해결 이슈
 
-- Java 트레이 앱의 배포/패키징(exe화) 난이도 검증 필요
-- WebSocket 연결 끊김 시 재연결 및 놓친 클립 재동기화 로직 필요 (재접속 시 `GET /api/clips`로 최근 목록을 다시 받아오는 방식으로 보완)
-- 서버 측 암호화 키 관리 방식은 MVP 이후 개선 필요
-- 민감정보(비밀번호 매니저에서 복사한 값 등) 필터링은 v1에서 별도 처리하지 않음 — 필요 시 "일시정지" 토글 정도로 완화
-- Fly.io/Railway 무료 티어의 WebSocket 유휴 연결 정책(슬립/타임아웃) 사전 확인 필요
+- ~~Java 트레이 앱의 배포/패키징(exe화) 난이도 검증 필요~~ → jpackage 포터블 zip으로 해결 (설치 마법사형은 WiX 필요, 미적용)
+- ~~WebSocket 연결 끊김 시 재연결 및 놓친 클립 재동기화 로직 필요~~ → 지수 백오프 재연결 + 재연결 시 `GET /api/clips` 재조회로 구현
+- ~~Fly.io/Railway 무료 티어의 WebSocket 유휴 연결 정책 확인 필요~~ → Oracle VM 사용으로 해당 없음
+- 서버 측 암호화 키 관리 방식은 MVP 이후 개선 필요. `CLIP_ENCRYPTION_KEY` 분실 시 기존 클립 복호화 불가 → 별도 백업 필수
+- 민감정보(비밀번호 매니저에서 복사한 값 등) 필터링은 v1에서 별도 처리하지 않음 — "일시정지" 토글로 완화 (구현 완료)
+- 공인 IP가 바뀌면 서버 주소(sslip.io)도 바뀜 → Oracle Reserved Public IP로 고정 권장. 주소 변경 시 exe 재배포 필요
+- 원격 로그아웃 시 WebSocket 종료는 서버 메모리 기반이라 서버 1대에서만 동작 (다중 서버 시 브로드캐스트 필요)
+- 같은 내용이 정확히 동시에 업로드되면 중복 저장될 수 있음 (중복 확인과 저장 사이 잠금 없음, 실사용 영향 미미)
+- 코드 서명 인증서가 없어 SmartScreen 경고 발생
 
 ## 10. 확장 고려사항 (백로그, 설계에 영향 주는 부분만)
 
