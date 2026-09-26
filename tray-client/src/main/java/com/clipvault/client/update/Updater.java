@@ -130,6 +130,9 @@ public class Updater {
                 "-NewDir", newApp.toString(),
                 "-Staging", staging.toString(),
                 "-Exe", exe.getFileName().toString())
+                // 작업 폴더를 앱 폴더 바깥으로 둔다. 탐색기에서 exe를 더블클릭하면 앱의 작업 폴더가 앱 폴더 자신인데,
+                // 스크립트가 그걸 물려받으면 윈도우가 "사용 중인 폴더"라며 앱 폴더 이름 변경을 막아 교체가 실패한다.
+                .directory(appDir.getParent().toFile())
                 // 앱이 먼저 꺼져도 스크립트가 출력 파이프 때문에 멈추지 않도록 로그 파일로 돌린다
                 .redirectErrorStream(true)
                 .redirectOutput(appDir.resolveSibling(appDir.getFileName() + ".update.log").toFile())
