@@ -193,7 +193,7 @@ public interface ImageStore {
 5. VM의 `deploy/.env`에 `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` 추가
 
 **순서**
-- 위 설정을 먼저 넣고 PR을 머지한다. 설정 없이 배포되면 서버가 컨테이너 내부 폴더(`LocalImageStore`)에 저장하고, 재배포 때 이미지가 사라진다.
+- 위 설정을 먼저 넣고 PR을 머지한다. 로컬 폴더 저장소(`LocalImageStore`)는 로컬 개발용이다(docker-compose가 `IMAGE_LOCAL_DIR=/tmp/clipvault-images`를 지정). 운영 이미지는 `/app`에 쓸 수 없으므로 `S3_*` 설정 없이 배포되면 이미지 업로드가 503으로 실패한다.
 - 머지 → deploy.yml이 백엔드 자동 배포 → 배포 서버 대상 E2E 확인 → (요청 시) v1.2.0 태그 → v1.1.0 사용자는 자동 업데이트로 받음.
 - 구버전 앱(v1.1.0)은 이미지 클립을 `[이미지 1920×1080]` 텍스트로 본다. 클릭하면 이 문구가 텍스트로 복사되지만 업데이트 전 과도기라 허용한다.
 

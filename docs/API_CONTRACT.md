@@ -72,7 +72,7 @@ ClipResponse = {id, type, content, contentHash, sourceDeviceId, createdAt, expir
 - 텍스트 클립: `width`, `height`, `size` = null. `content`는 업로드된 평문.
 - 이미지 클립: `width`, `height`, `size`는 원본 픽셀·바이트. `content`는 `[이미지 W×H]` 안내 문구.
 - 시각은 ISO-8601 UTC 문자열(`Instant`). id류는 UUID 문자열.
-- `contentHash` = content(텍스트·이미지) UTF-8의 SHA-256 소문자 hex.
+- `contentHash` = SHA-256 소문자 hex. 텍스트는 content의 UTF-8 바이트, 이미지는 업로드한 PNG 바이트의 해시.
 - DB의 content는 AES-GCM 암호문(base64, 앞 12바이트 IV). API로는 항상 평문.
 
 ## 4. WebSocket (STOMP)

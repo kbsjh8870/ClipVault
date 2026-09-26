@@ -189,7 +189,7 @@ clipvault/
 - DB는 외부 관리형 PostgreSQL(Neon)을 사용하므로 VM에는 DB 컨테이너가 없음
 - 환경변수(`DOMAIN`, DB 접속 정보, `JWT_SECRET`, `CLIP_ENCRYPTION_KEY`)는 VM의 `deploy/.env`에 두고 git에는 올리지 않음
 - 서버 VM 방화벽(Oracle Security List + VM iptables)에서 80/443 허용 필요 (80은 인증서 발급용)
-- 이미지 저장: 비공개 Oracle Object Storage 버킷(`clipvault-images`)을 사용하며, 객체 생성 8일 후 삭제하는 수명 주기 규칙을 걸어 서버 비정상 종료로 남은 객체를 정리한다. 접속 정보는 `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` 환경변수로 VM의 `deploy/.env`에 둔다. `S3_BUCKET`이 비어 있으면 로컬 폴더(`IMAGE_LOCAL_DIR`, 기본 `./data/images`)에 저장한다
+- 이미지 저장: 비공개 Oracle Object Storage 버킷(`clipvault-images`)을 사용하며, 객체 생성 8일 후 삭제하는 수명 주기 규칙을 걸어 서버 비정상 종료로 남은 객체를 정리한다. 접속 정보는 `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` 환경변수로 VM의 `deploy/.env`에 둔다. `S3_BUCKET`이 비어 있으면 로컬 폴더(`IMAGE_LOCAL_DIR`, 기본 `./data/images`)에 저장하는데, 이는 로컬 개발용이다(docker-compose가 `IMAGE_LOCAL_DIR=/tmp/clipvault-images`를 지정). 운영 이미지는 `/app`에 쓸 수 없으므로 운영에는 `S3_*` 설정이 필수이며, 없으면 이미지 업로드가 503으로 실패한다
 - 선정 과정: Vercel/Cloudflare Pages는 상시 구동 서버에 부적합, Render/Koyeb 무료 티어는 유휴 시 잠들어 WebSocket 알림이 지연, Fly.io/Railway는 유료 → 영구 무료이면서 항상 켜져 있는 Oracle VM 선택
 
 ### 8.2 프론트엔드(정적 사이트) — 현재 범위에는 없음
