@@ -23,14 +23,18 @@ public final class HashUtil {
     }
 
     /**
-     * 문자열을 UTF-8 바이트로 바꾼 뒤 SHA-256 해시를 계산해 소문자 16진수 문자열(64자)로 돌려준다.
-     *
-     * <p>예: {@code sha256("abc")} → {@code "ba7816bf8f01cfea..."}</p>
+     * 문자열(UTF-8)의 SHA-256.
      */
     public static String sha256(String text) {
+        return sha256(text.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /**
+     * 바이트 배열의 SHA-256을 소문자 16진수로. 이미지 중복 판정에 쓴다.
+     */
+    public static String sha256(byte[] data) {
         try {
-            byte[] digest = MessageDigest.getInstance("SHA-256").digest(text.getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(digest);
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(data));
         } catch (NoSuchAlgorithmException e) {
             // SHA-256은 모든 자바 런타임에 반드시 포함되어 있어서 실제로는 발생하지 않는다.
             throw new IllegalStateException(e);

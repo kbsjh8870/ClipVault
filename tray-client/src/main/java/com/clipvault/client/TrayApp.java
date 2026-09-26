@@ -4,6 +4,7 @@ import com.clipvault.client.auth.LoginDialog;
 import com.clipvault.client.auth.Session;
 import com.clipvault.client.clipboard.ClipboardWatcher;
 import com.clipvault.client.clipboard.EchoGuard;
+import com.clipvault.client.clipboard.Images;
 import com.clipvault.client.network.ApiClient;
 import com.clipvault.client.network.ClipSocket;
 import com.clipvault.client.ui.ClipListWindow;
@@ -16,9 +17,15 @@ import javax.swing.*;
 import java.awt.*;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
+import java.awt.image.BufferedImage;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -29,7 +36,7 @@ import java.util.concurrent.Executors;
  * <ul>
  *   <li>{@link Session}: 로그인 상태(토큰 등) 저장</li>
  *   <li>{@link ApiClient}: 서버 REST API 호출</li>
- *   <li>{@link ClipboardWatcher}: 로컬 Ctrl+C 감지 → {@link #onLocalCopy}</li>
+ *   <li>{@link ClipboardWatcher}: 로컬 Ctrl+C 감지 → {@link #onLocalCopy}(텍스트), {@link #onLocalImage}(이미지)</li>
  *   <li>{@link EchoGuard}: 업로드해도 되는지 판단 (서버에서 받은 걸 되돌려 보내지 않기)</li>
  *   <li>{@link ClipSocket}: 서버 실시간 알림 수신 → {@link #onPush}, 재연결 시 {@link #onConnected}</li>
  *   <li>{@link Updater}: 하루에 한 번 새 버전 확인 → 메뉴에 "업데이트" 항목 표시</li>
@@ -49,7 +56,18 @@ public class TrayApp {
     private final ApiClient api = new ApiClient(session);
     /** 서버에서 받아 로컬에 넣은 텍스트는 5초 동안 다시 업로드하지 않는다. */
     private final EchoGuard guard = new EchoGuard(Clock.systemUTC(), Duration.ofSeconds(5));
-    private final ClipboardWatcher watcher = new ClipboardWatcher(this::onLocalCopy);
+    private final ClipboardWatcher watcher = new ClipboardWatcher(this::onLocalCopy, this::onLocalImage);
+    /** 받아 온 썸네일 (클립 id → 이미지). 목록은 최근 20개만 보이므로 최근 50개만 메모리에 두고 오래된 것부터 버린다. */
+    private final Map<String, Image> thumbs = Collections.synchronizedMap(new LinkedHashMap<>(64, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, Image> eldest) {
+            return size() > 50;
+        }
+    });
+    /** 지금 받는 중인 썸네일 id (같은 썸네일을 동시에 여러 번 요청하지 않도록) */
+    private final Set<String> thumbsLoading = ConcurrentHashMap.newKeySet();
+    /** 받기에 실패한 썸네일 id. 다시 그릴 때마다(마우스 호버 등) 재요청하지 않도록 기억해 두고 회색 칸만 보인다 */
+    private final Set<String> thumbsFailed = ConcurrentHashMap.newKeySet();
     /** 인증을 잃으면(토큰 갱신 실패) 화면 스레드에서 로그아웃 처리 → 로그인 창 */
     private final ClipSocket socket = new ClipSocket(session, api, this::onPush, this::onConnected,
             () -> SwingUtilities.invokeLater(this::localLogout));
@@ -271,6 +289,8 @@ public class TrayApp {
     /** (EDT) 다른 기기에서 원격 로그아웃당했거나 토큰이 죽었을 때: 로컬 정보만 지우고 로그인 창으로. */
     private void localLogout() {
         session.clear();
+        // 401로 실패한 썸네일도 있으므로 다시 로그인하면 다시 받아 보게 한다
+        thumbsFailed.clear();
         showLogin();
     }
 
@@ -285,6 +305,23 @@ public class TrayApp {
         if (guard.shouldUpload(text)) async(() -> api.postClip(text));
     }
 
+    /**
+     * 로컬에서 새 이미지가 복사됨 (ClipboardWatcher가 호출, key = 이미지 키).
+     * PNG로 바꿔 10MB를 넘으면 올리지 않고 한 번 알린다 (같은 이미지는 EchoGuard가 다시 거르므로 알림도 한 번).
+     */
+    private void onLocalImage(BufferedImage img, String key) {
+        if (paused || !loggedIn || !guard.shouldUpload("img:" + key)) return;
+        async(() -> {
+            byte[] png = Images.toPng(img);
+            if (png.length > Images.MAX_BYTES) {
+                SwingUtilities.invokeLater(() -> icon.displayMessage("ClipVault",
+                        "이미지가 10MB를 넘어 동기화하지 않았습니다.", TrayIcon.MessageType.WARNING));
+                return;
+            }
+            api.postImage(png);
+        });
+    }
+
     /** 최근 클립 팝업을 띄운다. 목록을 보면 읽지 않은 수를 0으로 되돌린다. */
     private void showClips() {
         if (!loggedIn) { showLogin(); return; }
@@ -293,14 +330,59 @@ public class TrayApp {
             SwingUtilities.invokeLater(() -> {
                 unread = 0;
                 updateTooltip();
-                ClipListWindow.show(clips, session.deviceId, text -> {
-                    // 순서가 중요: 먼저 EchoGuard에 기록한 뒤 클립보드에 쓴다.
-                    // 그래야 감시기가 변화를 감지했을 때 "서버에서 받은 것"이라 업로드하지 않는다.
-                    guard.markApplied(text);
-                    watcher.write(text);
-                }, clip -> async(() -> api.deleteClip(clip.path("id").asText()))); // 삭제는 서버에 요청만 보낸다
+                ClipListWindow.show(clips, session.deviceId, this::pick,
+                        clip -> async(() -> api.deleteClip(clip.path("id").asText())), // 삭제는 서버에 요청만 보낸다
+                        this::thumbnail);
             });
         });
+    }
+
+    /** 목록에서 고른 클립을 로컬 클립보드에 넣는다. 텍스트는 바로, 이미지는 원본을 받아 온 뒤. */
+    private void pick(JsonNode clip) {
+        if ("IMAGE".equals(clip.path("type").asText())) {
+            pickImage(clip.path("id").asText());
+            return;
+        }
+        String text = clip.path("content").asText();
+        // 순서가 중요: 먼저 EchoGuard에 기록한 뒤 클립보드에 쓴다.
+        // 그래야 감시기가 변화를 감지했을 때 "서버에서 받은 것"이라 업로드하지 않는다.
+        guard.markApplied(text);
+        watcher.write(text);
+    }
+
+    /** 이미지 원본을 받아 클립보드에 넣는다. 실패하면 알림 (401은 async가 로그인 화면으로 보낸다). */
+    private void pickImage(String id) {
+        async(() -> {
+            try {
+                BufferedImage img = Images.fromPng(api.getImage(id));
+                SwingUtilities.invokeLater(() -> guard.markApplied("img:" + watcher.writeImage(img)));
+            } catch (RuntimeException e) {
+                if (e instanceof ApiClient.ApiException a && a.status == 401) throw a;
+                System.err.println("Image download failed: " + e);
+                SwingUtilities.invokeLater(() -> icon.displayMessage("ClipVault",
+                        "이미지를 가져오지 못했습니다.", TrayIcon.MessageType.ERROR));
+            }
+        });
+    }
+
+    /** 목록 창의 썸네일 공급자 ({@link ClipListWindow.Thumbs}). 없으면 백그라운드로 받고 다 받으면 onReady. */
+    private Image thumbnail(String id, Runnable onReady) {
+        Image t = thumbs.get(id);
+        if (t == null && !thumbsFailed.contains(id) && thumbsLoading.add(id)) {
+            async(() -> {
+                try {
+                    thumbs.put(id, Images.fromPng(api.getThumbnail(id)));
+                    SwingUtilities.invokeLater(onReady);
+                } catch (RuntimeException e) {
+                    // 기록만 하고 다시 던진다 (로그·401 로그아웃 처리는 async가 한다)
+                    thumbsFailed.add(id);
+                    throw e;
+                } finally {
+                    thumbsLoading.remove(id);
+                }
+            });
+        }
+        return t;
     }
 
     /**
@@ -310,8 +392,13 @@ public class TrayApp {
      */
     private void onPush(JsonNode clip) {
         noteSeen(clip);
-        String preview = clip.path("content").asText().strip();
-        if (preview.length() > 80) preview = preview.substring(0, 80) + "…";
+        String preview;
+        if ("IMAGE".equals(clip.path("type").asText())) {
+            preview = "새 이미지 · " + clip.path("width").asInt() + "×" + clip.path("height").asInt();
+        } else {
+            preview = clip.path("content").asText().strip();
+            if (preview.length() > 80) preview = preview.substring(0, 80) + "…";
+        }
         String p = preview; // 람다 안에서 쓰려면 값이 바뀌지 않는(effectively final) 변수여야 한다
         SwingUtilities.invokeLater(() -> {
             unread++;

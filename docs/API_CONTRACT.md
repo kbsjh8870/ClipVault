@@ -56,14 +56,23 @@
 - `POST /api/clips` `{content}` → 신규 `201` / 중복 `200`, body = ClipResponse
   - content: 공백만 있는 문자열 불가, 최대 100_000자.
   - 중복: 같은 user의 **가장 최근** 클립과 `contentHash`가 같으면 새 레코드 없이 `createdAt`,`expiresAt`, `sourceDeviceId` 갱신 후 200. 이 경우도 WS push 한다.
+- `POST /api/clips/image` (PNG 바이트, `Content-Type: image/png`) → 신규 `201` / 중복 `200`, body = ClipResponse
+  - 처리 순서: 크기 확인 (Content-Length ≤ 10MB = 10 × 1024 × 1024, 아니면 `413`) → 본문 읽기 (초과면 `413`) → 이미지 헤더 확인(PNG 형식, 픽셀 ≤ 5천만, 아니면 `400`) → 해시 계산 → 최근 클립과 같으면 시각 갱신 `200` 푸시 → 새 내용이면 썸네일 생성 → 원본·썸네일 암호화 → 버킷 저장(`503` 실패) → DB 저장(실패 시 객체 삭제 후 500) → `201` 푸시.
+  - 이미지 한도: PNG 바이트 10MB, 픽셀 5천만(가로×세로).
+  - 응답의 `content`는 `[이미지 W×H]` 안내 문구, `width/height/size`는 원본 픽셀·바이트.
+- `GET /api/clips/{id}/image` (image/png) → `200` 복호화한 원본 PNG. 남의 클립, 텍스트 클립, 객체 없음 → `404`.
+- `GET /api/clips/{id}/thumbnail` (image/png) → `200` 복호화한 썸네일 PNG (긴 변 최대 240px, 비율 유지, 원본이 더 작으면 원본 크기). 남의 클립, 텍스트 클립, 객체 없음 → `404`.
 - `GET /api/clips?limit=20` → `200` `[ClipResponse]` createdAt 내림차순, 만료 제외. limit 기본 20, 1~100으로 clamp.
-- `DELETE /api/clips/{id}` → `204`. 남의 클립 → 404.
+- `DELETE /api/clips/{id}` → `204`. 이미지 클립이면 버킷 객체(원본·썸네일)도 삭제(실패는 로그만). 남의 클립 → 404.
 
 ```
-ClipResponse = {id, content, contentHash, sourceDeviceId, createdAt, expiresAt}
+ClipResponse = {id, type, content, contentHash, sourceDeviceId, createdAt, expiresAt, width, height, size}
 ```
+- `type`: `"TEXT"` / `"IMAGE"`. 구버전 null 컬럼은 `"TEXT"`로 응답. 테스트 헬퍼 `Api.postImage(token, bytes)` 참고.
+- 텍스트 클립: `width`, `height`, `size` = null. `content`는 업로드된 평문.
+- 이미지 클립: `width`, `height`, `size`는 원본 픽셀·바이트. `content`는 `[이미지 W×H]` 안내 문구.
 - 시각은 ISO-8601 UTC 문자열(`Instant`). id류는 UUID 문자열.
-- `contentHash` = content UTF-8의 SHA-256 소문자 hex.
+- `contentHash` = SHA-256 소문자 hex. 텍스트는 content의 UTF-8 바이트, 이미지는 업로드한 PNG 바이트의 해시.
 - DB의 content는 AES-GCM 암호문(base64, 앞 12바이트 IV). API로는 항상 평문.
 
 ## 4. WebSocket (STOMP)
@@ -71,17 +80,19 @@ ClipResponse = {id, content, contentHash, sourceDeviceId, createdAt, expiresAt}
 - 엔드포인트: `/ws` (순수 WebSocket, SockJS 없음). simple broker `/topic`.
 - CONNECT 프레임 헤더 `Authorization: Bearer <device accessToken>` — 무효하면 연결 거부(ERROR 프레임).
 - SUBSCRIBE `/topic/clips/{userId}` — 본인 userId가 아니면 거부.
-- 클립 생성/갱신 시 서버가 해당 topic으로 ClipResponse JSON 전송.
+- 텍스트 클립 생성/갱신, 이미지 클립 생성/갱신 시 서버가 해당 topic으로 ClipResponse JSON 전송. 푸시 메시지에는 항상 `type` 필드가 포함된다.
 - 클라이언트는 `sourceDeviceId == 내 deviceId` 인 메시지를 무시(echo).
 - 기기가 원격 로그아웃(`DELETE /api/devices/{id}`)되면 서버가 그 기기의 열린 WebSocket 세션을 즉시 닫는다. 재연결 CONNECT는 401 사유로 거부된다.
 
 ## 5. 모듈 시그니처 (테스트가 직접 호출하므로 정확히 지킬 것)
 
 ### backend
-- `com.clipvault.common.HashUtil` — `public static String sha256(String text)` (소문자 hex)
-- `com.clipvault.common.AesCipher` — `public AesCipher(String base64Key)`, `public String encrypt(String plain)`, `public String decrypt(String cipherText)`. 같은 평문도 매번 다른 암호문.
+- `com.clipvault.common.HashUtil` — `public static String sha256(String text)` (소문자 hex), `public static String sha256(byte[] data)` (소문자 hex)
+- `com.clipvault.common.AesCipher` — `public AesCipher(String base64Key)`, `public String encrypt(String plain)`, `public String decrypt(String cipherText)`, `public byte[] encryptBytes(byte[] plain)`, `public byte[] decryptBytes(byte[] data)`. 같은 평문도 매번 다른 암호문. encryptBytes/decryptBytes 형식: IV(12바이트) ‖ 암호문(GCM 태그 포함), base64 없이 바이트 그대로.
+- `com.clipvault.storage.ImageStore` — `public void put(String key, byte[] data)` (없으면 덮어쓰고 실패 시 예외), `public byte[] get(String key)` (없으면 null), `public void delete(String key)` (없어도 예외 없음).
 - `com.clipvault.clip.ClipCleanupJob` — Spring bean, `public int deleteExpired()` 삭제 건수 반환, `@Scheduled(cron = "${clipvault.clip.cleanup-cron}")`.
-- 엔티티/리포지토리: `com.clipvault.auth.User`/`UserRepository`, `com.clipvault.device.Device`/`DeviceRepository`, `com.clipvault.clip.Clip`/`ClipRepository` (Spring Data JPA).
+- `com.clipvault.clip.ImageClipController` — `public static void deleteQuietly(ImageStore store, String imageKey)` (두 객체 images/key, thumbs/key 삭제, 실패는 로그만).
+- 엔티티/리포지토리: `com.clipvault.auth.User`/`UserRepository`, `com.clipvault.device.Device`/`DeviceRepository`, `com.clipvault.clip.Clip`/`ClipRepository` (Spring Data JPA). `ClipRepository.findExpiredImageKeys(Instant now)` 반환 `List<String>`, `Clip.getImageKey()` 반환 `String` (null 가능).
 
 ### tray-client
 - `com.clipvault.client.TrayApp` — `main`.

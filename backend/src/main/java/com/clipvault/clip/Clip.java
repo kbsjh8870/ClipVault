@@ -2,6 +2,8 @@ package com.clipvault.clip;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
@@ -55,6 +57,23 @@ public class Clip {
     @Column(name = "expires_at", nullable = false)
     private Instant expiresAt;
 
+    /** 클립 종류. 이미지 기능 이전에 저장된 행은 null이며 TEXT로 취급한다 ({@link #getType()}). */
+    @Enumerated(EnumType.STRING)
+    @Column(length = 10)
+    private ClipType type;
+
+    /** 버킷 객체 이름용 무작위 키 (images/{key}, thumbs/{key}). 이미지 클립만. */
+    @Column(name = "image_key", length = 64)
+    private String imageKey;
+
+    /** 원본 이미지 가로/세로(px). 이미지 클립만. */
+    private Integer width;
+    private Integer height;
+
+    /** 원본 PNG 바이트 수. 이미지 클립만. (컬럼명 size는 DB 예약어와 겹칠 수 있어 image_size) */
+    @Column(name = "image_size")
+    private Long size;
+
     /** JPA 전용 기본 생성자. */
     protected Clip() {
     }
@@ -72,6 +91,7 @@ public class Clip {
         this.contentHash = contentHash;
         this.createdAt = createdAt;
         this.expiresAt = expiresAt;
+        this.type = ClipType.TEXT;
     }
 
     /**
@@ -84,6 +104,20 @@ public class Clip {
         this.expiresAt = expiresAt;
     }
 
+    /**
+     * 이미지 클립 생성. content에는 "[이미지 W×H]" 안내 문구의 암호문을 넣는다 (구버전 앱 표시용).
+     */
+    public static Clip image(UUID userId, UUID sourceDeviceId, String encryptedLabel, String contentHash,
+                             String imageKey, int width, int height, long size, Instant createdAt, Instant expiresAt) {
+        Clip c = new Clip(userId, sourceDeviceId, encryptedLabel, contentHash, createdAt, expiresAt);
+        c.type = ClipType.IMAGE;
+        c.imageKey = imageKey;
+        c.width = width;
+        c.height = height;
+        c.size = size;
+        return c;
+    }
+
     public UUID getId() { return id; }
     public UUID getUserId() { return userId; }
     public UUID getSourceDeviceId() { return sourceDeviceId; }
@@ -91,4 +125,9 @@ public class Clip {
     public String getContentHash() { return contentHash; }
     public Instant getCreatedAt() { return createdAt; }
     public Instant getExpiresAt() { return expiresAt; }
+    public ClipType getType() { return type == null ? ClipType.TEXT : type; }
+    public String getImageKey() { return imageKey; }
+    public Integer getWidth() { return width; }
+    public Integer getHeight() { return height; }
+    public Long getSize() { return size; }
 }

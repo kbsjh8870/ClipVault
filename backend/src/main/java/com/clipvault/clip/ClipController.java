@@ -3,6 +3,7 @@ package com.clipvault.clip;
 import com.clipvault.auth.AuthUser;
 import com.clipvault.common.AesCipher;
 import com.clipvault.common.HashUtil;
+import com.clipvault.storage.ImageStore;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
@@ -50,13 +51,15 @@ public class ClipController {
     private final SimpMessagingTemplate messaging;
     /** 클립 보관 기간 (기본 7일, application.yml의 clipvault.clip.ttl). */
     private final Duration ttl;
+    private final ImageStore store;
 
     public ClipController(ClipRepository clips, AesCipher cipher, SimpMessagingTemplate messaging,
-                          @Value("${clipvault.clip.ttl}") Duration ttl) {
+                          @Value("${clipvault.clip.ttl}") Duration ttl, ImageStore store) {
         this.clips = clips;
         this.cipher = cipher;
         this.messaging = messaging;
         this.ttl = ttl;
+        this.store = store;
     }
 
     /**
@@ -89,7 +92,7 @@ public class ClipController {
             clip = clips.save(new Clip(me.userId(), me.deviceId(), cipher.encrypt(req.content()), hash, now, now.plus(ttl)));
         }
         // 응답과 알림에는 평문을 담는다 (방금 받은 원문을 그대로 쓰므로 다시 복호화할 필요 없음)
-        ClipResponse body = toResponse(clip, req.content());
+        ClipResponse body = ClipResponse.of(clip, req.content());
         // 같은 사용자의 모든 기기에 실시간 알림 (중복 재복사도 알림을 보낸다 → 다른 기기 목록에서 맨 위로 올라가도록)
         messaging.convertAndSend("/topic/clips/" + me.userId(), body);
         return ResponseEntity.status(duplicate ? HttpStatus.OK : HttpStatus.CREATED).body(body);
@@ -104,11 +107,14 @@ public class ClipController {
     public List<ClipResponse> list(@AuthenticationPrincipal AuthUser me, @RequestParam(defaultValue = "20") int limit) {
         return clips.findByUserIdAndExpiresAtAfterOrderByCreatedAtDesc(me.userId(), Instant.now(), Limit.of(Math.clamp(limit, 1, 100)))
                 // DB의 암호문을 평문으로 복호화해서 응답
-                .stream().map(c -> toResponse(c, cipher.decrypt(c.getContent()))).toList();
+                .stream().map(c -> ClipResponse.of(c, cipher.decrypt(c.getContent()))).toList();
     }
 
     /**
      * 클립 한 건 삭제. 204 No Content.
+     *
+     * <p><b>이미지 클립 처리</b>: 이미지 클립이면 DB 행을 삭제할 때 함께 버킷 객체(원본, 썸네일)도 지운다.
+     * 저장소 작업이 실패해도 행 삭제는 유지되고, 남은 객체는 버킷 수명 주기 규칙이 정리한다.</p>
      *
      * @throws ResponseStatusException 404 클립이 없거나 다른 사람의 클립
      *         (다른 사람의 클립이 "존재한다"는 사실조차 알려 주지 않기 위해 403 대신 404를 쓴다)
@@ -116,12 +122,11 @@ public class ClipController {
     @DeleteMapping("/{id}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void delete(@AuthenticationPrincipal AuthUser me, @PathVariable UUID id) {
-        clips.delete(clips.findByIdAndUserId(id, me.userId())
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Clip not found")));
+        Clip clip = clips.findByIdAndUserId(id, me.userId())
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Clip not found"));
+        clips.delete(clip);
+        // 이미지 클립이면 버킷의 원본·썸네일도 지운다 (실패해도 행 삭제는 유지, 남은 객체는 수명 주기 규칙이 정리)
+        if (clip.getImageKey() != null) ImageClipController.deleteQuietly(store, clip.getImageKey());
     }
 
-    /** 엔티티 + 평문 → 응답 DTO. 엔티티의 content는 암호문이라서 평문을 따로 받는다. */
-    private static ClipResponse toResponse(Clip c, String plain) {
-        return new ClipResponse(c.getId(), plain, c.getContentHash(), c.getSourceDeviceId(), c.getCreatedAt(), c.getExpiresAt());
-    }
 }

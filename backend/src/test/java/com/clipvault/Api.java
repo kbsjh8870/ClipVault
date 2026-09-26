@@ -6,7 +6,10 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
 
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayOutputStream;
 import java.util.UUID;
+import javax.imageio.ImageIO;
 
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -100,5 +103,21 @@ public class Api {
     public String createClip(String deviceToken, String content, int expectedStatus) throws Exception {
         return post("/api/clips", deviceToken, json("content", content))
                 .andExpect(status().is(expectedStatus)).andReturn().getResponse().getContentAsString();
+    }
+
+    /** 이미지 업로드 (본문 = PNG 바이트, Content-Type: image/png). */
+    public ResultActions postImage(String token, byte[] png) throws Exception {
+        var req = MockMvcRequestBuilders.post("/api/clips/image").contentType(MediaType.IMAGE_PNG).content(png);
+        if (token != null) req.header("Authorization", "Bearer " + token);
+        return mvc.perform(req);
+    }
+
+    /** 한 가지 색으로 칠한 w×h PNG를 만든다. 색이 다르면 다른 이미지(다른 해시). */
+    public static byte[] png(int w, int h, int rgb) throws Exception {
+        BufferedImage img = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
+        for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) img.setRGB(x, y, rgb);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ImageIO.write(img, "png", out);
+        return out.toByteArray();
     }
 }

@@ -169,4 +169,28 @@ class ClipWebSocketTest {
         assertTrue(rec.error.getCount() == 0 || !session.isConnected(),
                 "subscription should be rejected with an ERROR frame / disconnect");
     }
+
+    /** 이미지 업로드도 같은 topic으로 푸시되고, type/width/height가 담긴다 */
+    @Test
+    void imageUploadIsPushedWithType() throws Exception {
+        String email = Api.uniqueEmail();
+        api.signup(email);
+        Api.Tokens user = api.login(email);
+        Api.DeviceTokens a = api.registerDevice(user, "A");
+        Api.DeviceTokens b = api.registerDevice(user, "B");
+
+        Recorder rec = new Recorder();
+        StompSession session = connect(a.accessToken(), rec).get(3, TimeUnit.SECONDS);
+        session.subscribe("/topic/clips/" + user.userId(), rec);
+        Thread.sleep(300); // SUBSCRIBE가 서버 브로커에 등록될 시간
+
+        api.postImage(b.accessToken(), Api.png(40, 30, 0x336699));
+        Map<String, Object> msg = rec.messages.poll(3, TimeUnit.SECONDS);
+        assertNotNull(msg, "image push not received within 3s");
+        assertEquals("IMAGE", msg.get("type"));
+        assertEquals(40, msg.get("width"));
+        assertEquals(30, msg.get("height"));
+        assertEquals(b.deviceId(), msg.get("sourceDeviceId"));
+        session.disconnect();
+    }
 }

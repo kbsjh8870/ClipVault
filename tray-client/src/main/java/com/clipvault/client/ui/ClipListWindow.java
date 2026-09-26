@@ -9,6 +9,7 @@ import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
+import java.awt.geom.RoundRectangle2D;
 import java.util.function.Consumer;
 
 /**
@@ -28,15 +29,26 @@ public class ClipListWindow {
     private static final int WIDTH = 380;
 
     /**
+     * 썸네일 공급자. 캐시에 있으면 바로 돌려주고, 없으면 null을 돌려주면서 백그라운드로 받아 온 뒤 onReady를 부른다
+     * (onReady는 목록을 다시 그리게 한다).
+     */
+    @FunctionalInterface
+    public interface Thumbs {
+        Image get(String clipId, Runnable onReady);
+    }
+
+    /**
      * 팝업을 띄운다.
      *
      * @param clips      서버에서 받은 클립 목록(JSON 배열, 최신순)
      * @param myDeviceId 이 PC의 기기 ID ("이 PC"/"다른 기기" 표시용)
-     * @param onPick     사용자가 항목을 골랐을 때 호출 (선택한 텍스트 전달) - 로컬 클립보드에 넣는 일은 호출한 쪽이 한다
+     * @param onPick     사용자가 고른 클립(JSON 전체) - 텍스트/이미지에 따라 클립보드에 넣는 일은 호출한 쪽이 한다
      * @param onDelete   사용자가 항목을 삭제했을 때 호출 (삭제한 클립 전달) - 서버 삭제 요청은 호출한 쪽이 한다.
      *                   목록에서는 즉시 빠진다(서버 응답을 기다리지 않음)
+     * @param thumbs     이미지 클립의 썸네일을 가져오는 함수 (Task 10에서 렌더러에 연결)
      */
-    public static void show(JsonNode clips, String myDeviceId, Consumer<String> onPick, Consumer<JsonNode> onDelete) {
+    public static void show(JsonNode clips, String myDeviceId, Consumer<JsonNode> onPick, Consumer<JsonNode> onDelete,
+                             Thumbs thumbs) {
         if (open != null) open.dispose(); // 이미 떠 있던 팝업은 닫고 새로 띄운다
         DefaultListModel<JsonNode> model = new DefaultListModel<>();
         for (JsonNode c : clips) model.addElement(c);
@@ -46,7 +58,7 @@ public class ClipListWindow {
         list.setOpaque(false);
         // hover[0] = 마우스가 올라가 있는 항목 번호 (-1 = 없음), hover[1] = 1이면 그 항목의 휴지통 위에 있음
         int[] hover = {-1, 0};
-        list.setCellRenderer(new ClipCell(myDeviceId, hover));
+        list.setCellRenderer(new ClipCell(myDeviceId, hover, thumbs, list::repaint));
         // 칸 너비를 고정해야 긴 텍스트가 가로 스크롤을 만들지 않고 "…"으로 잘린다
         list.setFixedCellWidth(WIDTH - 24);
 
@@ -58,7 +70,7 @@ public class ClipListWindow {
         Runnable pick = () -> {
             JsonNode c = list.getSelectedValue();
             d.dispose();
-            if (c != null) onPick.accept(c.path("content").asText());
+            if (c != null) onPick.accept(c);
         };
         JLabel count = Theme.pill(model.size() + "개", Theme.selected(), Theme.ACCENT);
         JPanel root = new JPanel(new BorderLayout());
@@ -215,6 +227,42 @@ public class ClipListWindow {
         @Override public int getIconHeight() { return 16; }
     }
 
+    /**
+     * 썸네일 아이콘. 원본 비율대로 최대 220×90 안에 맞춰 그리고, 썸네일이 아직 없으면 같은 크기의 회색 자리를 그린다.
+     * 받기 전후 크기가 같아서 목록이 덜컥거리지 않는다.
+     */
+    private static final class ThumbIcon implements Icon {
+        static final int MAX_W = 220, MAX_H = 90;
+        Image image;
+        int w = MAX_W, h = MAX_H;
+
+        /** 그릴 이미지(없으면 null)와 원본 크기로 표시 크기를 정한다. */
+        void set(Image image, int srcW, int srcH) {
+            this.image = image;
+            double s = Math.min(1.0, Math.min((double) MAX_W / Math.max(1, srcW), (double) MAX_H / Math.max(1, srcH)));
+            w = Math.max(1, (int) Math.round(srcW * s));
+            h = Math.max(1, (int) Math.round(srcH * s));
+        }
+
+        @Override public void paintIcon(Component c, Graphics g, int x, int y) {
+            Graphics2D g2 = (Graphics2D) g.create();
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+            g2.clip(new RoundRectangle2D.Float(x, y, w, h, 8, 8)); // 모서리를 둥글게
+            if (image == null) {
+                g2.setColor(Theme.border());
+                g2.fillRect(x, y, w, h);
+            } else {
+                g2.drawImage(image, x, y, w, h, null);
+            }
+            g2.dispose();
+        }
+
+        @Override public int getIconWidth() { return w; }
+
+        @Override public int getIconHeight() { return h; }
+    }
+
     /** 클립이 하나도 없을 때 보여 줄 안내. */
     private static JComponent emptyState() {
         JPanel p = new JPanel(new GridBagLayout());
@@ -223,7 +271,7 @@ public class ClipListWindow {
         p.setPreferredSize(new Dimension(WIDTH, 150));
         JLabel big = new JLabel("아직 클립이 없어요");
         big.setFont(Theme.font(14f, Font.BOLD));
-        JLabel small = new JLabel("다른 PC에서 텍스트를 복사(Ctrl+C)해 보세요");
+        JLabel small = new JLabel("다른 PC에서 텍스트나 이미지를 복사(Ctrl+C)해 보세요");
         small.setForeground(Theme.muted());
         GridBagConstraints g = new GridBagConstraints();
         g.gridx = 0;
@@ -241,7 +289,10 @@ public class ClipListWindow {
      * <pre>
      * ┌──────────────────────────────────────┐
      * │ 회의 링크 https://meet.example.com/…  │  ← 내용 (줄바꿈은 공백으로, 길면 …)
-     * │ 3분 전 · [다른 기기]                   │  ← 시간 + 출처 배지
+     * │ ┌────────────┐                        │
+     * │ │  썸네일      │                        │  ← 이미지 클립: 썸네일 (받기 전엔 회색 자리)
+     * │ └────────────┘                        │
+     * │ 이미지 · 1920×1080  ·  3분 전 · [다른 기기] │
      * └──────────────────────────────────────┘
      * </pre>
      */
@@ -257,10 +308,15 @@ public class ClipListWindow {
         private final TrashIcon trashIcon = new TrashIcon();
         /** 오른쪽 휴지통 자리. 마우스가 올라간 칸에서만 아이콘을 보여 주고, 평소엔 빈 자리로 두어 글자 폭이 흔들리지 않게 한다. */
         private final JLabel trash = new JLabel();
+        private final Thumbs thumbs;
+        private final Runnable repaint;
+        private final ThumbIcon thumbIcon = new ThumbIcon();
 
-        ClipCell(String myDeviceId, int[] hover) {
+        ClipCell(String myDeviceId, int[] hover, Thumbs thumbs, Runnable repaint) {
             this.myDeviceId = myDeviceId;
             this.hover = hover;
+            this.thumbs = thumbs;
+            this.repaint = repaint;
             panel.setBorder(BorderFactory.createEmptyBorder(9, 14, 9, 14));
             text.setFont(Theme.font(13f, Font.PLAIN));
             time.setFont(Theme.font(11f, Font.PLAIN));
@@ -280,11 +336,22 @@ public class ClipListWindow {
         @Override
         public Component getListCellRendererComponent(JList<? extends JsonNode> list, JsonNode clip, int index,
                                                       boolean selected, boolean focus) {
-            // 줄바꿈/연속 공백을 한 칸으로 합치고, 길면 잘라서 "…" (실제로 복사되는 값은 원문 그대로)
-            String s = clip.path("content").asText().replaceAll("\\s+", " ").strip();
-            text.setText(s.length() > 48 ? s.substring(0, 48) + "…" : s);
+            String ago = Theme.ago(Theme.parse(clip.path("createdAt").asText()));
+            if ("IMAGE".equals(clip.path("type").asText())) {
+                // 이미지: 썸네일(없으면 회색 자리, 받아지면 repaint로 다시 그려짐) + "이미지 · W×H"
+                int w = clip.path("width").asInt(), h = clip.path("height").asInt();
+                thumbIcon.set(thumbs.get(clip.path("id").asText(), repaint), w, h);
+                text.setText(null);
+                text.setIcon(thumbIcon);
+                time.setText("이미지 · " + w + "×" + h + "  ·  " + ago + "  ·  ");
+            } else {
+                // 줄바꿈/연속 공백을 한 칸으로 합치고, 길면 잘라서 "…" (실제로 복사되는 값은 원문 그대로)
+                String s = clip.path("content").asText().replaceAll("\\s+", " ").strip();
+                text.setIcon(null);
+                text.setText(s.length() > 48 ? s.substring(0, 48) + "…" : s);
+                time.setText(ago + "  ·  ");
+            }
             text.setForeground(list.getForeground());
-            time.setText(Theme.ago(Theme.parse(clip.path("createdAt").asText())) + "  ·  ");
             boolean fromMe = clip.path("sourceDeviceId").asText().equals(myDeviceId);
             meta.removeAll();
             meta.add(time);

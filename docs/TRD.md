@@ -1,7 +1,7 @@
 # ClipVault — TRD (Technical Requirements Document)
 
-- 문서 버전: v0.3
-- 작성일: 2026-09-25 (최초) / 수정: 2026-09-26 (v1.0.1 구현 기준으로 기술 스택·API·배포 현행화, 자동 업데이트 추가)
+- 문서 버전: v0.4
+- 작성일: 2026-09-25 (최초) / 수정: 2026-09-26 (이미지 클립보드 동기화 반영: Object Storage, storage/ 폴더, clips 컬럼 추가, S3_* 환경변수)
 - 관련 문서: PRD.md, TASKS.md, API_CONTRACT.md (API 상세 명세의 기준 문서)
 
 ## 1. 아키텍처 개요
@@ -27,6 +27,7 @@
 | 실시간 통신 | Spring WebSocket (STOMP) | Spring 생태계에 내장되어 있어 별도 인프라(Redis Pub/Sub 등) 없이 시작 가능하고, topic 기반 pub/sub 구조가 "한 사용자의 여러 기기에 동시 브로드캐스트"하는 요구사항과 잘 맞음 |
 | ORM | Spring Data JPA | Spring Boot와 통합이 쉽고, 엔티티 3종(User/Device/Clip) 수준의 단순한 관계형 모델에 적합 |
 | DB | PostgreSQL | 관계형 구조(User-Device-Clip)가 명확하고, Supabase/Neon 등 무료 티어 선택지가 풍부해 예산 최소화 목표에 부합 |
+| 이미지 저장소 | Oracle Object Storage (S3 호환, AWS SDK v2) | 무료 20GB, 서버 경유·AES-GCM 암호화 |
 | 클라이언트(데스크톱) | Java 21 (Swing/AWT SystemTray) + FlatLaf | 백엔드와 동일 언어로 개발해 새 스택을 익힐 필요가 없고, `java.awt.Toolkit`의 클립보드 API가 OS 종속적이지 않아 추후 macOS 확장 시 재사용 가능성이 높음. FlatLaf로 윈도우 다크/라이트 모드를 따르는 모던 UI |
 | 클라이언트 통신 | `java.net.http` (HttpClient, WebSocket) + STOMP 직접 구현 | 외부 라이브러리 없이 JDK 기본 기능으로 REST/WebSocket 처리. STOMP는 필요한 프레임(CONNECT/SUBSCRIBE/MESSAGE/ERROR)만 구현 |
 | 배포(백엔드) | Oracle Cloud Always Free VM (ARM) + Docker Compose + Caddy | WebSocket을 상시 유지해야 해서 잠드는 무료 호스팅(Render 등)은 부적합, Fly.io/Railway는 유료. Always Free VM은 영구 무료이면서 항상 켜져 있음. Caddy가 HTTPS 인증서를 자동 발급 |
@@ -51,6 +52,7 @@ clipvault/
 │   │   ├── device/         # 기기 등록/조회/삭제
 │   │   ├── clip/           # 클립 업로드/조회/삭제, 중복 처리, TTL 배치
 │   │   ├── websocket/      # STOMP 설정, 인증 인터셉터, push 로직
+│   │   ├── storage/        # ImageStore(S3ImageStore/LocalImageStore), StorageConfig
 │   │   ├── config/         # SecurityConfig, WebSocketConfig 등
 │   │   └── common/         # 공통 예외처리, 유틸(해시 등)
 │   ├── src/main/resources/
@@ -104,6 +106,10 @@ clipvault/
 | content_hash | varchar | 중복 방지용 (동일 내용 재복사 시 timestamp만 갱신) |
 | created_at | timestamp | |
 | expires_at | timestamp | TTL 계산값 |
+| type | varchar(10), null 허용 | `TEXT` / `IMAGE`. null은 TEXT(기존 행 호환) |
+| image_key | varchar(64), null | 버킷 객체 이름용 무작위 UUID. 이미지 클립만 |
+| width, height | int, null | 원본 픽셀 크기. 이미지 클립만 |
+| image_size | bigint, null | 원본 PNG 바이트 수. 이미지 클립만 (`size`는 예약어 충돌을 피하려고 `image_size`로 둔다) |
 
 관계: `User 1—N Device`, `User 1—N Clip`, `Device 1—N Clip(source)`
 
@@ -183,6 +189,7 @@ clipvault/
 - DB는 외부 관리형 PostgreSQL(Neon)을 사용하므로 VM에는 DB 컨테이너가 없음
 - 환경변수(`DOMAIN`, DB 접속 정보, `JWT_SECRET`, `CLIP_ENCRYPTION_KEY`)는 VM의 `deploy/.env`에 두고 git에는 올리지 않음
 - 서버 VM 방화벽(Oracle Security List + VM iptables)에서 80/443 허용 필요 (80은 인증서 발급용)
+- 이미지 저장: 비공개 Oracle Object Storage 버킷(`clipvault-images`)을 사용하며, 객체 생성 8일 후 삭제하는 수명 주기 규칙을 걸어 서버 비정상 종료로 남은 객체를 정리한다. 접속 정보는 `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` 환경변수로 VM의 `deploy/.env`에 둔다. `S3_BUCKET`이 비어 있으면 로컬 폴더(`IMAGE_LOCAL_DIR`, 기본 `./data/images`)에 저장하는데, 이는 로컬 개발용이다(docker-compose가 `IMAGE_LOCAL_DIR=/tmp/clipvault-images`를 지정). 운영 이미지는 `/app`에 쓸 수 없으므로 운영에는 `S3_*` 설정이 필수이며, 없으면 이미지 업로드가 503으로 실패한다
 - 선정 과정: Vercel/Cloudflare Pages는 상시 구동 서버에 부적합, Render/Koyeb 무료 티어는 유휴 시 잠들어 WebSocket 알림이 지연, Fly.io/Railway는 유료 → 영구 무료이면서 항상 켜져 있는 Oracle VM 선택
 
 ### 8.2 프론트엔드(정적 사이트) — 현재 범위에는 없음
