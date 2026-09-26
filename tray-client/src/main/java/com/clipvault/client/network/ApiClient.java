@@ -15,6 +15,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Function;
 
 /**
  * 백엔드 REST API를 호출하는 클라이언트. 자바 기본 {@link HttpClient}를 쓴다(외부 HTTP 라이브러리 없음).
@@ -119,15 +120,43 @@ public class ApiClient {
     /** 클립 한 건 삭제. */
     public void deleteClip(String id) { authed("DELETE", "/api/clips/" + enc(id), null); }
 
+    /** 이미지 업로드 (PNG 바이트). 큰 파일이라 60초까지 기다린다. */
+    public JsonNode postImage(byte[] png) {
+        return authed(t -> json(exchange("POST", "/api/clips/image",
+                HttpRequest.BodyPublishers.ofByteArray(png), "image/png", t, LONG)));
+    }
+
+    /** 이미지 클립의 원본 PNG. */
+    public byte[] getImage(String id) {
+        return authed(t -> exchange("GET", "/api/clips/" + enc(id) + "/image", HttpRequest.BodyPublishers.noBody(), null, t, LONG));
+    }
+
+    /** 이미지 클립의 썸네일 PNG (긴 변 최대 240px). */
+    public byte[] getThumbnail(String id) {
+        return authed(t -> exchange("GET", "/api/clips/" + enc(id) + "/thumbnail", HttpRequest.BodyPublishers.noBody(), null, t, SHORT));
+    }
+
     // --- 내부 동작 ---
+
+    /** 일반 요청 제한 시간 */
+    private static final Duration SHORT = Duration.ofSeconds(15);
+    /** 이미지 업로드/다운로드 제한 시간 */
+    private static final Duration LONG = Duration.ofSeconds(60);
+
+    /** 토큰이 필요한 JSON 요청. */
+    private JsonNode authed(String method, String path, Object body) {
+        return authed(t -> send(method, path, body, t));
+    }
 
     /**
      * 토큰이 필요한 요청. 401을 받으면 토큰을 갱신하고 한 번만 다시 시도한다.
+     *
+     * @param call 토큰을 받아 실제 요청을 보내는 함수
      */
-    private JsonNode authed(String method, String path, Object body) {
+    private <T> T authed(Function<String, T> call) {
         String token = session.accessToken;
         try {
-            return send(method, path, body, token);
+            return call.apply(token);
         } catch (ApiException e) {
             if (e.status != 401) throw e;
             synchronized (this) {
@@ -135,35 +164,45 @@ public class ApiClient {
                 // 갱신이 실패하면(로그인 필요) 원래의 401 예외를 그대로 던진다.
                 if (Objects.equals(token, session.accessToken) && !refresh()) throw e;
             }
-            return send(method, path, body, session.accessToken);
+            return call.apply(session.accessToken);
+        }
+    }
+
+    /** JSON 요청을 보내고 JSON 응답을 돌려준다. body가 null이면 본문 없음. */
+    private JsonNode send(String method, String path, Object body, String token) {
+        try {
+            HttpRequest.BodyPublisher pub = body == null ? HttpRequest.BodyPublishers.noBody()
+                    : HttpRequest.BodyPublishers.ofString(JSON.writeValueAsString(body));
+            return json(exchange(method, path, pub, body == null ? null : "application/json", token, SHORT));
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
         }
     }
 
     /**
-     * 실제 HTTP 요청을 보내고 JSON 응답을 돌려준다.
+     * 실제 HTTP 요청. 응답 본문을 바이트로 돌려준다.
      *
-     * @param body  보낼 객체 (JSON으로 변환됨). null이면 본문 없음
-     * @param token 넣을 access 토큰. null이면 Authorization 헤더 없음
-     * @return 응답 JSON. 본문이 비어 있으면(204 등) JSON null 노드
+     * @param contentType 본문 형식. null이면 Content-Type 헤더 없음
+     * @param token       넣을 access 토큰. null이면 Authorization 헤더 없음
      * @throws ApiException 2xx가 아닌 응답. 서버가 준 에러 메시지({"message": ...})를 담는다
      */
-    private JsonNode send(String method, String path, Object body, String token) {
+    private byte[] exchange(String method, String path, HttpRequest.BodyPublisher body, String contentType,
+                            String token, Duration timeout) {
         try {
             HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(session.server + path))
-                    .timeout(Duration.ofSeconds(15))
-                    .method(method, body == null ? HttpRequest.BodyPublishers.noBody()
-                            : HttpRequest.BodyPublishers.ofString(JSON.writeValueAsString(body)));
-            if (body != null) b.header("Content-Type", "application/json");
+                    .timeout(timeout)
+                    .method(method, body);
+            if (contentType != null) b.header("Content-Type", contentType);
             if (token != null) b.header("Authorization", "Bearer " + token);
-            HttpResponse<String> res = http.send(b.build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-            String text = res.body();
+            HttpResponse<byte[]> res = http.send(b.build(), HttpResponse.BodyHandlers.ofByteArray());
             if (res.statusCode() / 100 != 2) {
                 // 서버의 에러 JSON에서 message만 꺼낸다. JSON이 아니면 본문 전체를 메시지로 쓴다.
+                String text = new String(res.body(), StandardCharsets.UTF_8);
                 String msg = text;
                 try { msg = JSON.readTree(text).path("message").asText(text); } catch (IOException ignored) { }
                 throw new ApiException(res.statusCode(), msg);
             }
-            return text == null || text.isBlank() ? JSON.nullNode() : JSON.readTree(text);
+            return res.body();
         } catch (IOException e) {
             // 네트워크 오류(서버 꺼짐, 연결 끊김 등)
             throw new UncheckedIOException(e);
@@ -171,6 +210,15 @@ public class ApiClient {
             // 스레드 중단 요청을 받으면 중단 표시를 복구하고 빠져나간다 (자바 관례)
             Thread.currentThread().interrupt();
             throw new IllegalStateException(e);
+        }
+    }
+
+    /** 응답 바이트를 JSON으로. 비어 있으면(204 등) JSON null 노드. */
+    private static JsonNode json(byte[] body) {
+        try {
+            return body.length == 0 ? JSON.nullNode() : JSON.readTree(body);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
         }
     }
 
