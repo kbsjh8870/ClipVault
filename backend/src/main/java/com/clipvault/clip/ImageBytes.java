@@ -1,6 +1,7 @@
 package com.clipvault.clip;
 
 import javax.imageio.ImageIO;
+import javax.imageio.ImageReadParam;
 import javax.imageio.ImageReader;
 import javax.imageio.stream.ImageInputStream;
 import java.awt.Dimension;
@@ -39,11 +40,39 @@ final class ImageBytes {
         }
     }
 
-    /** 긴 변이 max px가 되도록 비율을 유지해 줄인 PNG. 원본이 더 작으면 원본 크기 그대로. */
-    static byte[] thumbnail(BufferedImage src, int max) {
-        double scale = Math.min(1.0, (double) max / Math.max(src.getWidth(), src.getHeight()));
-        int w = Math.max(1, (int) Math.round(src.getWidth() * scale));
-        int h = Math.max(1, (int) Math.round(src.getHeight() * scale));
+    /**
+     * 긴 변이 max px가 되도록 비율을 유지해 줄인 PNG. 원본이 더 작으면 원본 크기 그대로.
+     *
+     * <p>원본 전체를 풀지 않는다. 16비트 RGBA PNG는 픽셀당 8바이트라 5천만 픽셀이면 400MB가 되기 때문에,
+     * 읽을 때부터 n픽셀마다 하나씩만 읽어(서브샘플링) 긴 변이 max 근처인 작은 이미지만 메모리에 올린 뒤
+     * 정확한 크기로 다시 줄인다. 픽셀 데이터가 깨졌으면 IllegalArgumentException.</p>
+     */
+    static byte[] thumbnail(byte[] png, int max) {
+        BufferedImage src;
+        int width, height;
+        try (ImageInputStream in = ImageIO.createImageInputStream(new ByteArrayInputStream(png))) {
+            Iterator<ImageReader> readers = ImageIO.getImageReaders(in);
+            if (!readers.hasNext()) throw new IllegalArgumentException("not an image");
+            ImageReader r = readers.next();
+            try {
+                r.setInput(in);
+                width = r.getWidth(0);
+                height = r.getHeight(0);
+                int n = Math.max(1, (int) Math.ceil(Math.max(width, height) / (double) max));
+                ImageReadParam param = r.getDefaultReadParam();
+                param.setSourceSubsampling(n, n, 0, 0);
+                src = r.read(0, param);
+            } finally {
+                r.dispose();
+            }
+        } catch (IOException | RuntimeException e) {
+            // 헤더는 멀쩡해도 픽셀 데이터가 깨졌으면 여기서 실패한다 (IIOException 등)
+            throw new IllegalArgumentException("broken image", e);
+        }
+        // 원래 크기를 기준으로 목표 크기를 정해야 서브샘플링 반올림 오차 없이 기존과 같은 크기가 나온다
+        double scale = Math.min(1.0, (double) max / Math.max(width, height));
+        int w = Math.max(1, (int) Math.round(width * scale));
+        int h = Math.max(1, (int) Math.round(height * scale));
         BufferedImage out = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
         Graphics2D g = out.createGraphics();
         g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);

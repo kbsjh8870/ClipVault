@@ -162,6 +162,56 @@ class ImageClipApiTest {
         api.postImage(dev.accessToken(), out.toByteArray()).andExpect(status().isBadRequest());
     }
 
+    /** 16비트 RGBA PNG(픽셀당 8바이트)도 전체를 풀지 않고 썸네일을 만든다 → 201, 썸네일 240×180 */
+    @Test
+    void sixteenBitRgbaImageUploads() throws Exception {
+        java.awt.image.ColorModel cm = new java.awt.image.ComponentColorModel(
+                java.awt.color.ColorSpace.getInstance(java.awt.color.ColorSpace.CS_sRGB), true, false,
+                java.awt.Transparency.TRANSLUCENT, java.awt.image.DataBuffer.TYPE_USHORT);
+        BufferedImage img = new BufferedImage(cm, cm.createCompatibleWritableRaster(4000, 3000), false, null);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ImageIO.write(img, "png", out);
+        String id = read(upload(out.toByteArray(), 201), "$.id");
+        BufferedImage t = ImageIO.read(new ByteArrayInputStream(bytes("/api/clips/" + id + "/thumbnail", dev.accessToken(), 200)));
+        assertEquals(240, t.getWidth());
+        assertEquals(180, t.getHeight());
+    }
+
+    /** 헤더는 멀쩡하지만 픽셀 데이터가 깨진 PNG → 400 (500이 아니라) */
+    @Test
+    void corruptPngDataIs400() throws Exception {
+        byte[] png = png(300, 200, 0x336699);
+        // PNG 시그니처(8) + IHDR 청크(25) 뒤부터 끝 12바이트(IEND) 앞까지 0으로 채운다
+        Arrays.fill(png, 33, png.length - 12, (byte) 0);
+        api.postImage(dev.accessToken(), png).andExpect(status().isBadRequest());
+    }
+
+    /** 같은 이미지 재업로드(200) 뒤에도 원본·썸네일 객체가 남아 있다 */
+    @Test
+    void duplicateKeepsObjects() throws Exception {
+        byte[] png = png(40, 40, 0x445566);
+        String id = read(upload(png, 201), "$.id");
+        String key = clipRepository.findById(java.util.UUID.fromString(id)).orElseThrow().getImageKey();
+        upload(png, 200);
+        assertNotNull(store.get("images/" + key));
+        assertNotNull(store.get("thumbs/" + key));
+    }
+
+    /** 버킷에서 원본이 사라진 최근 클립과 같은 이미지 → 중복으로 보지 않고 새 클립(새 키)으로 저장 */
+    @Test
+    void duplicateWithMissingObjectStoresAgain() throws Exception {
+        byte[] png = png(40, 40, 0x778899);
+        String id = read(upload(png, 201), "$.id");
+        String key = clipRepository.findById(java.util.UUID.fromString(id)).orElseThrow().getImageKey();
+        store.delete("images/" + key);
+        String id2 = read(upload(png, 201), "$.id");
+        assertNotEquals(id, id2);
+        String key2 = clipRepository.findById(java.util.UUID.fromString(id2)).orElseThrow().getImageKey();
+        assertNotEquals(key, key2);
+        assertNotNull(store.get("images/" + key2));
+        assertNotNull(store.get("thumbs/" + key2));
+    }
+
     /** 토큰 없이 → 401 또는 403 (기존 Clips API와 같은 보안 규칙) */
     @Test
     void uploadWithoutTokenIsRejected() throws Exception {

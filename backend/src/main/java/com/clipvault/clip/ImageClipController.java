@@ -6,13 +6,10 @@ import com.clipvault.common.HashUtil;
 import com.clipvault.storage.ImageStore;
 import jakarta.servlet.http.HttpServletRequest;
 import java.awt.Dimension;
-import java.awt.image.BufferedImage;
-import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
-import javax.imageio.ImageIO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -90,20 +87,24 @@ public class ImageClipController {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Image has too many pixels");
         }
 
-        // 3. 중복: 가장 최근 클립과 같은 이미지면 시각만 갱신 (버킷 작업 없음)
+        // 3. 중복: 가장 최근 클립과 같은 이미지면 시각만 갱신
         String hash = HashUtil.sha256(png);
         Instant now = Instant.now();
         Clip latest = clips.findFirstByUserIdOrderByCreatedAtDesc(me.userId()).orElse(null);
-        if (latest != null && latest.getContentHash().equals(hash)) {
+        if (latest != null && latest.getContentHash().equals(hash) && renewObjects(latest)) {
             latest.refresh(me.deviceId(), now, now.plus(ttl));
             Clip saved = clips.save(latest);
             return push(me, ClipResponse.of(saved, cipher.decrypt(saved.getContent())), HttpStatus.OK);
         }
 
-        // 4. 썸네일을 만들고 원본·썸네일을 암호화해서 버킷에 저장
-        BufferedImage img = ImageIO.read(new ByteArrayInputStream(png));
-        if (img == null) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Body must be a PNG image");
-        byte[] thumb = ImageBytes.thumbnail(img, THUMB_SIZE);
+        // 4. 썸네일을 만들고 원본·썸네일을 암호화해서 버킷에 저장.
+        // 썸네일은 서브샘플링으로 작게만 풀어서 만든다 (전체를 풀면 16비트 PNG에서 수백 MB가 된다)
+        byte[] thumb;
+        try {
+            thumb = ImageBytes.thumbnail(png, THUMB_SIZE);
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Body must be a PNG image");
+        }
         String key = UUID.randomUUID().toString();
         try {
             store.put(IMAGES + key, cipher.encryptBytes(png));
@@ -137,6 +138,26 @@ public class ImageClipController {
     @GetMapping(path = "/{id}/thumbnail", produces = MediaType.IMAGE_PNG_VALUE)
     public byte[] thumbnail(@AuthenticationPrincipal AuthUser me, @PathVariable UUID id) {
         return load(me, id, THUMBS);
+    }
+
+    /**
+     * 중복 업로드로 만료를 7일 늘릴 때, 버킷 객체도 다시 써서 생성 시각을 새로 한다.
+     * 버킷 수명 주기 규칙은 객체 생성 8일 뒤에 지우므로, 그대로 두면 클립은 살아 있는데 객체만 사라진다.
+     * 텍스트 클립은 할 일이 없어 true. 객체가 이미 없으면 false → 새 클립(새 키)으로 저장하게 한다.
+     */
+    private boolean renewObjects(Clip c) {
+        if (c.getImageKey() == null) return true;
+        try {
+            byte[] image = store.get(IMAGES + c.getImageKey());
+            byte[] thumb = store.get(THUMBS + c.getImageKey());
+            if (image == null || thumb == null) return false;
+            store.put(IMAGES + c.getImageKey(), image);
+            store.put(THUMBS + c.getImageKey(), thumb);
+            return true;
+        } catch (RuntimeException e) {
+            log.error("Image storage failed", e);
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "Image storage unavailable");
+        }
     }
 
     /** 이미지 클립의 두 객체(원본, 썸네일)를 지운다. 실패해도 예외 없이 로그만 (남은 객체는 버킷 수명 주기 규칙이 정리). */
