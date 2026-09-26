@@ -30,6 +30,7 @@ class ImageClipApiTest {
     @Autowired ClipRepository clipRepository;
     @Autowired ImageStore store;
     @Autowired JdbcTemplate jdbc;
+    @Autowired ClipCleanupJob cleanupJob;
     Api api;
     Api.DeviceTokens dev;
 
@@ -166,5 +167,28 @@ class ImageClipApiTest {
     void uploadWithoutTokenIsRejected() throws Exception {
         int s = api.postImage(null, png(5, 5, 0)).andReturn().getResponse().getStatus();
         assertTrue(s == 401 || s == 403, "status " + s);
+    }
+
+    /** 이미지 클립을 삭제하면 버킷의 원본·썸네일도 지워진다 */
+    @Test
+    void deleteRemovesObjects() throws Exception {
+        String id = read(upload(png(10, 10, 0x0A0A0A), 201), "$.id");
+        String key = clipRepository.findById(java.util.UUID.fromString(id)).orElseThrow().getImageKey();
+        api.delete("/api/clips/" + id, dev.accessToken()).andExpect(status().isNoContent());
+        assertNull(store.get("images/" + key));
+        assertNull(store.get("thumbs/" + key));
+    }
+
+    /** 만료 정리 작업이 이미지 행과 버킷 객체를 모두 지운다 */
+    @Test
+    void cleanupRemovesExpiredObjects() throws Exception {
+        String id = read(upload(png(10, 10, 0x0B0B0B), 201), "$.id");
+        String key = clipRepository.findById(java.util.UUID.fromString(id)).orElseThrow().getImageKey();
+        jdbc.update("update clips set expires_at = ? where cast(id as varchar) = ?",
+                java.sql.Timestamp.from(java.time.Instant.now().minusSeconds(3600)), id);
+        assertTrue(cleanupJob.deleteExpired() >= 1);
+        assertTrue(clipRepository.findById(java.util.UUID.fromString(id)).isEmpty());
+        assertNull(store.get("images/" + key));
+        assertNull(store.get("thumbs/" + key));
     }
 }

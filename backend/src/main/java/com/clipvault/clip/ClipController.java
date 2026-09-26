@@ -3,6 +3,7 @@ package com.clipvault.clip;
 import com.clipvault.auth.AuthUser;
 import com.clipvault.common.AesCipher;
 import com.clipvault.common.HashUtil;
+import com.clipvault.storage.ImageStore;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
@@ -50,13 +51,15 @@ public class ClipController {
     private final SimpMessagingTemplate messaging;
     /** 클립 보관 기간 (기본 7일, application.yml의 clipvault.clip.ttl). */
     private final Duration ttl;
+    private final ImageStore store;
 
     public ClipController(ClipRepository clips, AesCipher cipher, SimpMessagingTemplate messaging,
-                          @Value("${clipvault.clip.ttl}") Duration ttl) {
+                          @Value("${clipvault.clip.ttl}") Duration ttl, ImageStore store) {
         this.clips = clips;
         this.cipher = cipher;
         this.messaging = messaging;
         this.ttl = ttl;
+        this.store = store;
     }
 
     /**
@@ -110,14 +113,20 @@ public class ClipController {
     /**
      * 클립 한 건 삭제. 204 No Content.
      *
+     * <p><b>이미지 클립 처리</b>: 이미지 클립이면 DB 행을 삭제할 때 함께 버킷 객체(원본, 썸네일)도 지운다.
+     * 저장소 작업이 실패해도 행 삭제는 유지되고, 남은 객체는 버킷 수명 주기 규칙이 정리한다.</p>
+     *
      * @throws ResponseStatusException 404 클립이 없거나 다른 사람의 클립
      *         (다른 사람의 클립이 "존재한다"는 사실조차 알려 주지 않기 위해 403 대신 404를 쓴다)
      */
     @DeleteMapping("/{id}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void delete(@AuthenticationPrincipal AuthUser me, @PathVariable UUID id) {
-        clips.delete(clips.findByIdAndUserId(id, me.userId())
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Clip not found")));
+        Clip clip = clips.findByIdAndUserId(id, me.userId())
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Clip not found"));
+        clips.delete(clip);
+        // 이미지 클립이면 버킷의 원본·썸네일도 지운다 (실패해도 행 삭제는 유지, 남은 객체는 수명 주기 규칙이 정리)
+        if (clip.getImageKey() != null) ImageClipController.deleteQuietly(store, clip.getImageKey());
     }
 
 }

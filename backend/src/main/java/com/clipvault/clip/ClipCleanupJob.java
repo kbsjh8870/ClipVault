@@ -1,5 +1,6 @@
 package com.clipvault.clip;
 
+import com.clipvault.storage.ImageStore;
 import java.time.Instant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,13 +24,19 @@ public class ClipCleanupJob {
     private static final Logger log = LoggerFactory.getLogger(ClipCleanupJob.class);
 
     private final ClipRepository clips;
+    private final ImageStore store;
 
-    public ClipCleanupJob(ClipRepository clips) {
+    public ClipCleanupJob(ClipRepository clips, ImageStore store) {
         this.clips = clips;
+        this.store = store;
     }
 
     /**
      * 만료 시각이 지금보다 이전(같거나 이전)인 클립을 모두 삭제한다.
+     *
+     * <p><b>이미지 클립 처리</b>: DB 행을 지우기 전에 만료된 이미지 클립의 버킷 객체(원본, 썸네일)부터 지운다.
+     * 행을 지우면 imageKey를 더는 알 수 없기 때문이다. 버킷 작업이 실패해도 행 삭제는 계속 진행되며,
+     * 남은 객체는 버킷 수명 주기 규칙이 나중에 정리한다.</p>
      *
      * <p>{@code @Scheduled}: 정해진 cron 시각에 스프링이 자동으로 호출한다(BackendApplication의 @EnableScheduling 필요).
      * {@code @Transactional}: DELETE 쿼리는 트랜잭션 안에서 실행되어야 한다.</p>
@@ -39,7 +46,10 @@ public class ClipCleanupJob {
     @Scheduled(cron = "${clipvault.clip.cleanup-cron}")
     @Transactional
     public int deleteExpired() {
-        int deleted = clips.deleteExpired(Instant.now());
+        Instant now = Instant.now();
+        // 행을 지우면 버킷 키를 알 수 없으므로 버킷 객체부터 지운다
+        for (String key : clips.findExpiredImageKeys(now)) ImageClipController.deleteQuietly(store, key);
+        int deleted = clips.deleteExpired(now);
         log.info("Deleted {} expired clips", deleted);
         return deleted;
     }
