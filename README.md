@@ -31,6 +31,7 @@
 ## 주요 기능
 
 - **자동 캡처와 동기화**: 텍스트를 복사하면 서버에 올라가고, 다른 PC에 WebSocket으로 실시간 알림이 갑니다 (실측 1초 이내).
+- **이미지 동기화**: 스크린샷 등 복사한 이미지도 동기화, 목록에서 썸네일로 확인 (10MB 이하)
 - **알림 후 클릭 시 반영**: 다른 PC의 클립보드를 멋대로 덮어쓰지 않습니다. 트레이 목록에서 원하는 항목을 클릭할 때만 복사됩니다.
 - **최근 클립 목록**: 트레이 아이콘을 클릭하면 최근 20개가 "3분 전 · 다른 기기"처럼 표시됩니다.
 - **중복 방지**: 같은 텍스트를 다시 복사하면 새로 쌓지 않고 시각만 갱신합니다.
@@ -51,6 +52,7 @@ flowchart LR
         C["Caddy<br/>HTTPS 자동 인증서"] --> S["Spring Boot API"]
     end
     S -- "JPA" --> D[("PostgreSQL<br/>(Neon)")]
+    S -- "이미지 저장/조회" --> O[("Object Storage<br/>(Oracle, S3 호환)")]
 ```
 
 1. 트레이 앱이 로컬 클립보드 변경을 감지하면 `POST /api/clips`로 업로드합니다.
@@ -126,6 +128,7 @@ sudo docker compose -f deploy/docker-compose.prod.yml up -d --build
 | `DB_URL`, `DB_USERNAME`, `DB_PASSWORD` | PostgreSQL 접속 정보 (JDBC 형식) |
 | `JWT_SECRET` | 토큰 서명 키, 32바이트 이상 (`openssl rand -base64 48`) |
 | `CLIP_ENCRYPTION_KEY` | 클립 암호화 키, base64 32바이트 (`openssl rand -base64 32`). 잃어버리면 저장된 클립을 복호화할 수 없습니다 |
+| `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` | 이미지 저장용 Oracle Object Storage(S3 호환) 접속 정보. `S3_BUCKET`이 비어 있으면 로컬 폴더(`IMAGE_LOCAL_DIR`, 기본 `./data/images`)에 저장합니다 |
 
 Caddy가 HTTPS 인증서를 자동으로 발급하고 갱신하며, WebSocket(`wss://`)도 그대로 전달합니다.
 
@@ -160,7 +163,6 @@ Caddy가 HTTPS 인증서를 자동으로 발급하고 갱신하며, WebSocket(`w
 
 - 모바일 대응 (PWA, 수동 저장/복사)
 - macOS 트레이 앱
-- 이미지 클립보드
 - 검색 / 태그 / 즐겨찾기
 - 종단간 암호화
 - GitHub Actions로 빌드/릴리스 자동화
