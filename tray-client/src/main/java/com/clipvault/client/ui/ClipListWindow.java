@@ -1,8 +1,12 @@
 package com.clipvault.client.ui;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.formdev.flatlaf.icons.FlatSearchIcon;
 
 import javax.swing.*;
+import javax.swing.event.DocumentEvent;
+import javax.swing.event.DocumentListener;
+import javax.swing.text.DefaultEditorKit;
 import java.awt.*;
 import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
@@ -10,6 +14,9 @@ import java.awt.event.MouseEvent;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.awt.geom.RoundRectangle2D;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
 import java.util.function.Consumer;
 
 /**
@@ -19,6 +26,9 @@ import java.util.function.Consumer;
  * 항목을 클릭하거나 방향키로 고른 뒤 Enter를 누르면 그 텍스트가 로컬 클립보드에 복사된다(바로 Ctrl+V 가능).
  * 항목에 마우스를 올리면 오른쪽에 휴지통 아이콘이 나타나고, 그걸 누르거나 Delete 키를 누르면 서버에서 삭제된다.
  * Esc를 누르거나 다른 곳을 클릭하면(포커스를 잃으면) 닫힌다.</p>
+ *
+ * <p>위쪽 검색칸에 글자를 치면 그 글자가 들어 있는 텍스트 클립만 남는다. 창이 뜨면 검색칸에 포커스가 있어서
+ * 바로 타이핑할 수 있고, 방향키/Enter/Delete/Esc는 검색칸이 목록 대신 처리한다.</p>
  *
  * <p>화면 스레드(EDT)에서 호출해야 한다.</p>
  */
@@ -50,12 +60,17 @@ public class ClipListWindow {
     public static void show(JsonNode clips, String myDeviceId, Consumer<JsonNode> onPick, Consumer<JsonNode> onDelete,
                              Thumbs thumbs) {
         if (open != null) open.dispose(); // 이미 떠 있던 팝업은 닫고 새로 띄운다
+        // all = 전체 클립, model = 검색어에 맞는 것만 (목록에 보이는 것). 검색어가 비어 있으면 둘이 같다.
+        List<JsonNode> all = new ArrayList<>();
+        clips.forEach(all::add);
         DefaultListModel<JsonNode> model = new DefaultListModel<>();
-        for (JsonNode c : clips) model.addElement(c);
+        all.forEach(model::addElement);
 
         JList<JsonNode> list = new JList<>(model);
         list.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         list.setOpaque(false);
+        // 키보드 입력은 전부 검색칸이 받는다 (방향키/Enter/Delete/Esc는 검색칸이 목록 대신 처리). 목록은 마우스 전용.
+        list.setFocusable(false);
         // hover[0] = 마우스가 올라가 있는 항목 번호 (-1 = 없음), hover[1] = 1이면 그 항목의 휴지통 위에 있음
         int[] hover = {-1, 0};
         list.setCellRenderer(new ClipCell(myDeviceId, hover, thumbs, list::repaint));
@@ -73,22 +88,44 @@ public class ClipListWindow {
             if (c != null) onPick.accept(c);
         };
         JLabel count = Theme.pill(model.size() + "개", Theme.selected(), Theme.ACCENT);
+        JTextField search = new JTextField();
+        search.putClientProperty("JTextField.placeholderText", "검색");
+        search.putClientProperty("JTextField.leadingIcon", new FlatSearchIcon());
+        search.putClientProperty("JTextField.showClearButton", true);
+        // 개수 배지: 검색 중이면 "보이는 개수 / 전체", 아니면 "전체개"
+        Runnable updateCount = () -> count.setText(search.getText().isBlank()
+                ? all.size() + "개" : model.size() + " / " + all.size() + "개");
+        // 검색어가 바뀔 때마다 목록을 다시 채우고 첫 항목을 선택한다 (바로 Enter로 복사할 수 있게)
+        Runnable filter = () -> {
+            model.clear();
+            for (JsonNode c : all) if (matches(c, search.getText())) model.addElement(c);
+            hover[0] = -1;
+            if (!model.isEmpty()) list.setSelectedIndex(0);
+            updateCount.run();
+        };
+        search.getDocument().addDocumentListener(new DocumentListener() {
+            @Override public void insertUpdate(DocumentEvent e) { filter.run(); }
+            @Override public void removeUpdate(DocumentEvent e) { filter.run(); }
+            @Override public void changedUpdate(DocumentEvent e) { filter.run(); }
+        });
         JPanel root = new JPanel(new BorderLayout());
         // 삭제 처리: 목록에서 바로 빼고, 개수 배지를 고치고, 호출한 쪽에 알린다. 다 지우면 "비어 있음" 화면으로 바꾼다.
         java.util.function.IntConsumer delete = i -> {
             if (i < 0 || i >= model.size()) return;
             JsonNode c = model.remove(i);
+            all.remove(c);
             hover[0] = -1;
             onDelete.accept(c);
-            count.setText(model.size() + "개");
-            if (model.isEmpty()) {
+            updateCount.run();
+            if (all.isEmpty()) {
                 int bottom = d.getY() + d.getHeight(); // 팝업 아래쪽(트레이 쪽) 위치를 유지한 채 크기만 줄인다
                 root.remove(1);
                 root.add(emptyState(), BorderLayout.CENTER);
                 count.getParent().setVisible(false);
+                search.getParent().remove(search); // 검색할 게 없으니 검색칸도 뺀다
                 d.pack();
                 d.setLocation(d.getX(), bottom - d.getHeight());
-            } else {
+            } else if (!model.isEmpty()) {
                 list.setSelectedIndex(Math.min(i, model.size() - 1)); // 키보드로 연달아 지울 수 있게 다음 항목 선택
             }
         };
@@ -115,20 +152,21 @@ public class ClipListWindow {
         };
         list.addMouseListener(mouse);
         list.addMouseMotionListener(mouse);
+        // ----- 키보드: 검색칸에 포커스가 있는 채로 목록을 조작한다 -----
+        // 위/아래 = 선택 이동
+        bind(search, KeyEvent.VK_UP, () -> move(list, -1));
+        bind(search, KeyEvent.VK_DOWN, () -> move(list, 1));
         // Enter = 선택
-        list.getInputMap().put(KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, 0), "pick");
-        list.getActionMap().put("pick", new AbstractAction() {
-            @Override public void actionPerformed(java.awt.event.ActionEvent e) { pick.run(); }
+        bind(search, KeyEvent.VK_ENTER, pick);
+        // Delete = 검색어가 비어 있으면 선택한 항목 삭제, 검색어가 있으면 원래대로 글자 지우기
+        Action deleteChar = search.getActionMap().get(DefaultEditorKit.deleteNextCharAction);
+        bind(search, KeyEvent.VK_DELETE, () -> {
+            if (search.getText().isEmpty()) delete.accept(list.getSelectedIndex());
+            else deleteChar.actionPerformed(new java.awt.event.ActionEvent(search, 0, null));
         });
-        // Delete = 선택한 항목 삭제
-        list.getInputMap().put(KeyStroke.getKeyStroke(KeyEvent.VK_DELETE, 0), "delete");
-        list.getActionMap().put("delete", new AbstractAction() {
-            @Override public void actionPerformed(java.awt.event.ActionEvent e) { delete.accept(list.getSelectedIndex()); }
-        });
-        // Esc = 닫기
-        list.getInputMap().put(KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0), "close");
-        list.getActionMap().put("close", new AbstractAction() {
-            @Override public void actionPerformed(java.awt.event.ActionEvent e) { d.dispose(); }
+        // Esc = 검색어가 있으면 지우기, 없으면 닫기
+        bind(search, KeyEvent.VK_ESCAPE, () -> {
+            if (search.getText().isEmpty()) d.dispose(); else search.setText("");
         });
         // 팝업 밖을 클릭해서 포커스를 잃으면 닫기
         d.addWindowFocusListener(new WindowAdapter() {
@@ -150,11 +188,15 @@ public class ClipListWindow {
             right.add(count);
             header.add(right, BorderLayout.EAST);
         }
-        JLabel hint = new JLabel("클릭: 복사   ·   휴지통 / Delete 키: 삭제");
+        JLabel hint = new JLabel("클릭 / Enter: 복사   ·   휴지통 / Delete 키: 삭제");
         hint.setFont(Theme.font(11f, Font.PLAIN));
         hint.setForeground(Theme.muted());
         hint.setBorder(BorderFactory.createEmptyBorder(4, 26, 0, 0));
-        header.add(hint, BorderLayout.SOUTH);
+        JPanel south = new JPanel(new BorderLayout(0, 10));
+        south.setOpaque(false);
+        south.add(hint, BorderLayout.NORTH);
+        if (!model.isEmpty()) south.add(search, BorderLayout.SOUTH); // 클립이 없으면 검색칸도 없다
+        header.add(south, BorderLayout.SOUTH);
 
         // ----- 본문: 목록 또는 "비어 있음" 안내 -----
         JComponent body;
@@ -191,7 +233,37 @@ public class ClipListWindow {
         d.setLocation(x, y);
         d.setVisible(true);
         d.toFront();
-        list.requestFocusInWindow(); // 바로 방향키/Enter로 조작할 수 있게 포커스
+        if (!model.isEmpty()) list.setSelectedIndex(0);
+        search.requestFocusInWindow(); // 바로 타이핑해서 검색하거나 방향키/Enter로 조작할 수 있게 포커스
+    }
+
+    /**
+     * 검색어에 맞는 클립인지. 텍스트 클립의 내용에 검색어가 들어 있으면(대소문자 무시) 맞다.
+     * 이미지는 검색할 글자가 없으므로 검색어가 있으면 빠진다. 검색어가 비어 있으면 전부 맞다.
+     */
+    static boolean matches(JsonNode clip, String query) {
+        String q = query.strip().toLowerCase(Locale.ROOT);
+        if (q.isEmpty()) return true;
+        return !"IMAGE".equals(clip.path("type").asText())
+                && clip.path("content").asText().toLowerCase(Locale.ROOT).contains(q);
+    }
+
+    /** 키 하나를 동작에 연결한다 (컴포넌트에 포커스가 있을 때). */
+    private static void bind(JComponent c, int key, Runnable r) {
+        String name = "clipvault." + key;
+        c.getInputMap().put(KeyStroke.getKeyStroke(key, 0), name);
+        c.getActionMap().put(name, new AbstractAction() {
+            @Override public void actionPerformed(java.awt.event.ActionEvent e) { r.run(); }
+        });
+    }
+
+    /** 선택을 위(-1)/아래(+1)로 한 칸 옮기고 보이게 스크롤한다. 끝에서는 멈춘다. */
+    private static void move(JList<?> list, int step) {
+        int n = list.getModel().getSize();
+        if (n == 0) return;
+        int i = Math.max(0, Math.min(n - 1, list.getSelectedIndex() + step));
+        list.setSelectedIndex(i);
+        list.ensureIndexIsVisible(i);
     }
 
     /** 휴지통 영역 너비(px). 각 칸의 오른쪽 끝 이만큼이 삭제 버튼 역할을 한다. */

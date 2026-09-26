@@ -97,7 +97,7 @@
 - [ ] 모바일 대응 (PWA, Android Web Share Target 검토, 정적 리소스는 Vercel/Cloudflare Pages 배포 검토)
 - [ ] macOS 트레이 앱 지원
 - [x] 이미지 클립보드 지원
-- [ ] 검색 / 태그 / 즐겨찾기 기능
+- [ ] 검색 / 태그 / 즐겨찾기 기능 → 최근 클립 창 텍스트 검색 완료, 태그·즐겨찾기 남음
 - [ ] 종단간 암호화(E2E) 전환
 - [ ] 사용자별 TTL 설정 옵션
 - [x] GitHub Actions 기반 CI/CD 구축
