@@ -29,4 +29,25 @@ class AesCipherTest {
         // 저장 형식 확인: 최소한 IV(12바이트) + 인증 태그(16바이트)는 들어 있어야 한다
         assertTrue(Base64.getDecoder().decode(c1).length >= 12 + 16);
     }
+
+    /** 바이트 암복호화: 되돌리면 원본, 같은 평문도 매번 다른 암호문(IV 무작위), 길이 = IV 12 + 평문 + 태그 16 */
+    @Test
+    void bytesRoundTripWithRandomIv() {
+        AesCipher cipher = new AesCipher(KEY);
+        byte[] plain = {0, 1, 2, (byte) 0xFF, 42};
+        byte[] a = cipher.encryptBytes(plain);
+        byte[] b = cipher.encryptBytes(plain);
+        assertFalse(java.util.Arrays.equals(a, b));
+        assertEquals(12 + plain.length + 16, a.length);
+        assertArrayEquals(plain, cipher.decryptBytes(a));
+    }
+
+    /** 암호문이 1비트라도 바뀌면 복호화가 실패해야 한다 (GCM 무결성 검사) */
+    @Test
+    void tamperedBytesFailToDecrypt() {
+        AesCipher cipher = new AesCipher(KEY);
+        byte[] a = cipher.encryptBytes(new byte[]{1, 2, 3});
+        a[a.length - 1] ^= 1;
+        assertThrows(IllegalStateException.class, () -> cipher.decryptBytes(a));
+    }
 }

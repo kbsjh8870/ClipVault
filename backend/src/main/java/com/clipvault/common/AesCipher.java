@@ -56,40 +56,43 @@ public class AesCipher {
     }
 
     /**
-     * 평문을 암호화한다.
-     *
-     * @param plain 클립 원문
-     * @return base64 문자열 (IV + 암호문 + 태그). 같은 평문이라도 호출할 때마다 결과가 다르다.
+     * 문자열 암호화 → base64(IV ‖ 암호문). DB의 content 컬럼용.
      */
     public String encrypt(String plain) {
+        return Base64.getEncoder().encodeToString(encryptBytes(plain.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    /**
+     * {@link #encrypt}의 반대.
+     */
+    public String decrypt(String cipherText) {
+        return new String(decryptBytes(Base64.getDecoder().decode(cipherText)), StandardCharsets.UTF_8);
+    }
+
+    /**
+     * 바이트 암호화 → IV(12바이트) ‖ 암호문(GCM 태그 포함). 이미지 파일용 (base64로 늘리지 않고 그대로 저장).
+     */
+    public byte[] encryptBytes(byte[] plain) {
         try {
-            // 1) 매번 새로운 랜덤 IV 생성
             byte[] iv = new byte[IV_BYTES];
             RANDOM.nextBytes(iv);
-            // 2) AES-GCM으로 암호화 (결과 ct에는 암호문 + 인증태그가 함께 들어 있다)
             Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
             cipher.init(Cipher.ENCRYPT_MODE, key, new GCMParameterSpec(TAG_BITS, iv));
-            byte[] ct = cipher.doFinal(plain.getBytes(StandardCharsets.UTF_8));
-            // 3) [IV][암호문+태그] 순서로 이어 붙인 뒤 문자열로 저장할 수 있게 base64 인코딩
-            return Base64.getEncoder().encodeToString(ByteBuffer.allocate(IV_BYTES + ct.length).put(iv).put(ct).array());
+            byte[] ct = cipher.doFinal(plain);
+            return ByteBuffer.allocate(IV_BYTES + ct.length).put(iv).put(ct).array();
         } catch (GeneralSecurityException e) {
             throw new IllegalStateException("encrypt failed", e);
         }
     }
 
     /**
-     * {@link #encrypt}로 만든 문자열을 원래 평문으로 되돌린다.
-     *
-     * @throws IllegalStateException 키가 다르거나 암호문이 변조되었으면 실패한다.
+     * {@link #encryptBytes}의 반대. 키가 다르거나 내용이 변조되었으면 IllegalStateException.
      */
-    public String decrypt(String cipherText) {
+    public byte[] decryptBytes(byte[] data) {
         try {
-            byte[] all = Base64.getDecoder().decode(cipherText);
             Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-            // 앞 12바이트를 IV로 사용
-            cipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(TAG_BITS, all, 0, IV_BYTES));
-            // 12바이트 이후 나머지 전체(암호문+태그)를 복호화. 태그가 안 맞으면 여기서 예외 발생
-            return new String(cipher.doFinal(all, IV_BYTES, all.length - IV_BYTES), StandardCharsets.UTF_8);
+            cipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(TAG_BITS, data, 0, IV_BYTES));
+            return cipher.doFinal(data, IV_BYTES, data.length - IV_BYTES);
         } catch (GeneralSecurityException e) {
             throw new IllegalStateException("decrypt failed", e);
         }

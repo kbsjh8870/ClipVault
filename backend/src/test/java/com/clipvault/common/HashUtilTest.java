@@ -13,4 +13,10 @@ class HashUtilTest {
         // 빈 문자열의 SHA-256
         assertEquals("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", HashUtil.sha256(""));
     }
+
+    /** 바이트 버전은 같은 내용의 문자열 버전과 같은 해시를 낸다 */
+    @Test
+    void bytesMatchStringVersion() {
+        assertEquals(HashUtil.sha256("abc"), HashUtil.sha256("abc".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+    }
 }
