@@ -122,6 +122,11 @@ public class TrayApp {
 
     /** 트레이 아이콘을 띄우고, 저장된 로그인 정보가 있으면 이어서 로그인, 없으면 로그인 창을 띄운다. */
     private void start() {
+        try {
+            AutoStart.refresh(); // 앱 폴더를 옮겼으면 등록된 경로를 지금 위치로 고친다
+        } catch (RuntimeException ignored) {
+            // 레지스트리를 못 고쳐도 앱 실행에는 지장 없다
+        }
         SwingUtilities.invokeLater(() -> {
             try {
                 menu = buildMenu();
@@ -184,6 +189,17 @@ public class TrayApp {
         });
         JCheckBoxMenuItem pause = pauseItem = new JCheckBoxMenuItem("일시정지", paused); // 지난번 상태 복원
         pause.addActionListener(e -> setPaused(pause.isSelected()));
+        // 윈도우 시작 시 실행. 체크 상태는 레지스트리에서 읽는다 (IDE 실행이면 등록할 exe가 없어 비활성)
+        JCheckBoxMenuItem autoStart = new JCheckBoxMenuItem("윈도우 시작 시 실행", AutoStart.enabled());
+        autoStart.setEnabled(AutoStart.available());
+        autoStart.addActionListener(e -> {
+            try {
+                AutoStart.set(autoStart.isSelected());
+            } catch (RuntimeException ex) {
+                autoStart.setSelected(AutoStart.enabled()); // 실패하면 실제 상태로 되돌린다
+                icon.displayMessage("ClipVault", "자동 실행 설정을 바꾸지 못했습니다: " + ex.getMessage(), TrayIcon.MessageType.WARNING);
+            }
+        });
         JMenuItem keys = new JMenuItem("단축키 설정…");
         keys.addActionListener(e -> HotKeyDialog.show(hotKeys, this::refreshMenuLabels));
         // 현재 버전 (누를 수 없는 회색 항목). IDE에서 실행하면 버전 정보가 없다.
@@ -196,6 +212,7 @@ public class TrayApp {
         menu.add(clips);
         menu.add(devices);
         menu.add(pause);
+        menu.add(autoStart);
         menu.add(keys);
         menu.addSeparator();
         menu.add(logout);
