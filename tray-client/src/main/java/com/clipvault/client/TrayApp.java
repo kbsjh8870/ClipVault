@@ -21,6 +21,8 @@ import java.awt.image.BufferedImage;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -55,10 +57,17 @@ public class TrayApp {
     /** 서버에서 받아 로컬에 넣은 텍스트는 5초 동안 다시 업로드하지 않는다. */
     private final EchoGuard guard = new EchoGuard(Clock.systemUTC(), Duration.ofSeconds(5));
     private final ClipboardWatcher watcher = new ClipboardWatcher(this::onLocalCopy, this::onLocalImage);
-    /** 받아 온 썸네일 (클립 id → 이미지). 앱이 켜져 있는 동안만 메모리에 둔다. */
-    private final Map<String, Image> thumbs = new ConcurrentHashMap<>();
+    /** 받아 온 썸네일 (클립 id → 이미지). 목록은 최근 20개만 보이므로 최근 50개만 메모리에 두고 오래된 것부터 버린다. */
+    private final Map<String, Image> thumbs = Collections.synchronizedMap(new LinkedHashMap<>(64, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, Image> eldest) {
+            return size() > 50;
+        }
+    });
     /** 지금 받는 중인 썸네일 id (같은 썸네일을 동시에 여러 번 요청하지 않도록) */
     private final Set<String> thumbsLoading = ConcurrentHashMap.newKeySet();
+    /** 받기에 실패한 썸네일 id. 다시 그릴 때마다(마우스 호버 등) 재요청하지 않도록 기억해 두고 회색 칸만 보인다 */
+    private final Set<String> thumbsFailed = ConcurrentHashMap.newKeySet();
     /** 인증을 잃으면(토큰 갱신 실패) 화면 스레드에서 로그아웃 처리 → 로그인 창 */
     private final ClipSocket socket = new ClipSocket(session, api, this::onPush, this::onConnected,
             () -> SwingUtilities.invokeLater(this::localLogout));
@@ -280,6 +289,8 @@ public class TrayApp {
     /** (EDT) 다른 기기에서 원격 로그아웃당했거나 토큰이 죽었을 때: 로컬 정보만 지우고 로그인 창으로. */
     private void localLogout() {
         session.clear();
+        // 401로 실패한 썸네일도 있으므로 다시 로그인하면 다시 받아 보게 한다
+        thumbsFailed.clear();
         showLogin();
     }
 
@@ -357,11 +368,15 @@ public class TrayApp {
     /** 목록 창의 썸네일 공급자 ({@link ClipListWindow.Thumbs}). 없으면 백그라운드로 받고 다 받으면 onReady. */
     private Image thumbnail(String id, Runnable onReady) {
         Image t = thumbs.get(id);
-        if (t == null && thumbsLoading.add(id)) {
+        if (t == null && !thumbsFailed.contains(id) && thumbsLoading.add(id)) {
             async(() -> {
                 try {
                     thumbs.put(id, Images.fromPng(api.getThumbnail(id)));
                     SwingUtilities.invokeLater(onReady);
+                } catch (RuntimeException e) {
+                    // 기록만 하고 다시 던진다 (로그·401 로그아웃 처리는 async가 한다)
+                    thumbsFailed.add(id);
+                    throw e;
                 } finally {
                     thumbsLoading.remove(id);
                 }
