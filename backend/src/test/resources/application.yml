@@ -24,3 +24,6 @@ clipvault:
   clip:
     ttl: 7d
     cleanup-cron: "0 0 4 * * *"
+  storage:
+    # 테스트는 버킷 없이 build 폴더 아래에 저장한다
+    local-dir: build/test-images

@@ -9,7 +9,7 @@ services:
     build:
       context: ..                    # 멀티프로젝트 Gradle 빌드라 저장소 루트를 컨텍스트로 쓴다
       dockerfile: backend/Dockerfile
-    env_file: .env                   # DB_URL, DB_USERNAME, DB_PASSWORD, JWT_SECRET, CLIP_ENCRYPTION_KEY
+    env_file: .env                   # DB_*, JWT_SECRET, CLIP_ENCRYPTION_KEY, S3_*
     restart: unless-stopped          # 서버 재부팅/크래시 후 자동 재시작
     mem_limit: 1g
     # 포트를 바깥에 직접 열지 않는다. 외부 요청은 모두 Caddy(443)를 거쳐 들어온다.

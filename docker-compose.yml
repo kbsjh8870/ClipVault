@@ -24,6 +24,7 @@ services:
       DB_PASSWORD: clipvault
       JWT_SECRET: ${JWT_SECRET:-local-dev-only-jwt-secret-change-me-32b}
       CLIP_ENCRYPTION_KEY: ${CLIP_ENCRYPTION_KEY:-bG9jYWwtZGV2LW9ubHkta2V5LTMyLWJ5dGVzLSEhISE=}
+      IMAGE_LOCAL_DIR: /tmp/clipvault-images
     ports:
       - "8080:8080"
     depends_on:
