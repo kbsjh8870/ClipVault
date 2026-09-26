@@ -46,7 +46,7 @@ tasks.register('packageApp', Exec) {
     }
     args '--type', 'app-image',
             '--name', 'ClipVault',
-            '--app-version', '1.0.0',
+            '--app-version', (findProperty('appVersion') ?: '1.0.0').toString(), // 릴리스 워크플로가 태그(v1.2.3)에서 넘겨준다
             '--vendor', 'ClipVault',
             '--input', layout.buildDirectory.dir('install/tray-client/lib').get().asFile.absolutePath,
             '--main-jar', 'tray-client.jar',
