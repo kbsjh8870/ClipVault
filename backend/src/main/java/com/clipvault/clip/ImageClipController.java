@@ -69,6 +69,8 @@ public class ImageClipController {
     }
 
     /** 이미지 업로드. 신규 201, 가장 최근 클립과 같은 이미지면 시각만 갱신하고 200. */
+    // ponytail(의도적 단순화): 중복 확인(조회)과 저장 사이에 잠금이 없다. 똑같은 이미지가 정확히 동시에 두 번 올라오면
+    // 둘 다 새 클립으로 저장될 수 있다. 클립보드 특성상 거의 일어나지 않고 일어나도 해가 없어서 그대로 둔다.
     @PostMapping(path = "/image", consumes = MediaType.IMAGE_PNG_VALUE)
     public ResponseEntity<ClipResponse> upload(@AuthenticationPrincipal AuthUser me, HttpServletRequest req) throws IOException {
         // 1. 크기: 본문을 읽기 전에 Content-Length로 거절하고, 읽을 때도 한도+1바이트까지만 읽는다
