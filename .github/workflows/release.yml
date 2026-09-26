@@ -34,6 +34,11 @@ jobs:
       - name: Build ClipVault.exe
         run: ./gradlew :tray-client:packageZip -PappVersion="${GITHUB_REF_NAME#v}"
 
+      # 앱의 자동 업데이트가 받은 zip이 손상되지 않았는지 이 체크섬으로 확인한다
+      - name: Checksum
+        working-directory: tray-client/build/dist
+        run: sha256sum ClipVault-windows.zip > ClipVault-windows.zip.sha256
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -44,8 +49,11 @@ jobs:
           2. `ClipVault\ClipVault.exe` 를 실행합니다. (Java 설치 불필요 — 런타임 포함)
           3. 처음이면 **회원가입**, 다른 PC에서도 같은 계정으로 로그인하면 동기화됩니다.
 
+          > 이미 설치해 두었다면 트레이 메뉴의 **업데이트** 항목으로 바로 업데이트할 수 있습니다. (v1.1.0 이상)
+          >
           > 서명되지 않은 실행 파일이라 처음 실행 시 "Windows의 PC 보호" 경고가 뜰 수 있습니다. **추가 정보 → 실행**을 누르세요.
 
           EOF
-          gh release create "$GITHUB_REF_NAME" tray-client/build/dist/ClipVault-windows.zip \
+          gh release create "$GITHUB_REF_NAME" \
+            tray-client/build/dist/ClipVault-windows.zip tray-client/build/dist/ClipVault-windows.zip.sha256 \
             --title "ClipVault $GITHUB_REF_NAME" --notes-file notes.md --generate-notes

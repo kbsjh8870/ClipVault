@@ -1,7 +1,7 @@
 # ClipVault — TRD (Technical Requirements Document)
 
 - 문서 버전: v0.3
-- 작성일: 2026-09-25 (최초) / 수정: 2026-09-26 (v1.0.1 구현 기준으로 기술 스택·API·배포 현행화)
+- 작성일: 2026-09-25 (최초) / 수정: 2026-09-26 (v1.0.1 구현 기준으로 기술 스택·API·배포 현행화, 자동 업데이트 추가)
 - 관련 문서: PRD.md, TASKS.md, API_CONTRACT.md (API 상세 명세의 기준 문서)
 
 ## 1. 아키텍처 개요
@@ -63,7 +63,8 @@ clipvault/
 │   │   ├── clipboard/      # ClipboardWatcher, EchoGuard(재업로드 방지)
 │   │   ├── network/        # ApiClient(REST), ClipSocket(WebSocket), StompFrame
 │   │   ├── ui/             # Theme, 클립 목록 팝업, 기기 관리 창
-│   │   └── auth/           # 로그인 창, Session(토큰/설정 저장)
+│   │   ├── auth/           # 로그인 창, Session(토큰/설정 저장)
+│   │   └── update/         # Updater(새 버전 확인/설치), update.ps1(폴더 교체 스크립트)
 │   ├── packaging/          # ClipVault.ico
 │   └── build.gradle        # packageApp/packageZip (jpackage)
 ├── deploy/                 # 운영용 docker-compose.prod.yml, Caddyfile, .env.example
@@ -192,10 +193,15 @@ clipvault/
 - GitHub Releases로 배포. 고정 다운로드 링크: `https://github.com/kbsjh8870/ClipVault/releases/latest/download/ClipVault-windows.zip`
 - 기본 서버 주소는 배포 서버. 로그인 창의 "서버 설정"에서 변경 가능
 - 코드 서명이 없어 첫 실행 시 SmartScreen 경고가 뜸 (추가 정보 → 실행)
+- **자동 업데이트** (v1.1.0~): 켜질 때와 24시간마다 GitHub `releases/latest`의 태그를 exe의 앱 버전(`jpackage.app-version`)과 비교한다. 새 버전이 있으면 트레이 알림 + 메뉴에 "업데이트 (vX.Y.Z)" 표시.
+  - 클릭 → 확인 → zip을 앱 폴더 옆(`ClipVault.update/`)에 받아 릴리스의 `.sha256`으로 검증하고 풀어 둔 뒤, `update.ps1`을 띄우고 앱 종료
+  - 스크립트: 앱 프로세스(실행기+자바) 종료 대기 → 기존 폴더를 `.old`로 → 새 폴더를 제자리로 → 재실행 → `.old` 삭제. 실패하면 `.old`를 되돌린다
+  - 로그인/설정은 레지스트리(Preferences)에 있어 폴더 교체 후에도 유지. 앱 폴더 상위에 쓰기 권한이 없으면(Program Files 등) 릴리스 페이지를 연다
+  - 체크섬은 손상만 막는다. 서명 검증은 코드 서명 도입 시 추가
 
 ### 8.4 CI/CD (GitHub Actions)
 - `ci.yml`: 모든 push/PR에서 전체 테스트
-- `release.yml`: `v*` 태그 푸시 시 Windows 러너에서 exe 빌드 후 GitHub 릴리스 생성 (앱 버전은 태그에서 추출)
+- `release.yml`: `v*` 태그 푸시 시 Windows 러너에서 exe 빌드 후 GitHub 릴리스 생성 (앱 버전은 태그에서 추출). 자동 업데이트용 `ClipVault-windows.zip.sha256`도 함께 올린다
 - `deploy.yml`: main의 `backend/`, `deploy/`, Gradle 설정 변경 시 백엔드 테스트 후 VM에 SSH 접속해 `git reset --hard origin/main` + `docker compose up -d --build`, 이후 외부 헬스 체크(401 응답 확인). SSH 정보는 GitHub Secrets(`DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY`)
 
 ## 9. 리스크 및 미해결 이슈
