@@ -70,15 +70,31 @@ public class AesCipher {
     }
 
     /**
-     * 바이트 암호화 → IV(12바이트) ‖ 암호문(GCM 태그 포함). 이미지 파일용 (base64로 늘리지 않고 그대로 저장).
+     * 바이트 배열을 암호화한다.
+     *
+     * <p><b>저장 형식</b>: {@code IV 12바이트 + 암호문 + 인증태그 16바이트}</p>
+     * <ul>
+     *   <li>IV(초기화 벡터)는 암호화할 때마다 새로 뽑는 랜덤 값이다.
+     *       그래서 같은 내용을 두 번 암호화해도 결과가 매번 다르다(패턴 노출 방지).</li>
+     *   <li>복호화할 때 IV가 필요하므로 암호문 앞에 붙여서 함께 저장한다. IV는 비밀이 아니라서 괜찮다.</li>
+     *   <li>GCM 인증 태그를 포함하면 누군가 암호문을 몰래 바꾸면 복호화 단계에서 바로 오류가 난다(위변조 감지).</li>
+     * </ul>
+     *
+     * <p>이미지 파일 저장용(base64로 늘리지 않고 그대로 저장).</p>
+     *
+     * @param plain 평문 바이트 배열
+     * @return 암호화된 바이트 배열 (길이 = 12 + plaintext.length + 16). 같은 평문이라도 호출할 때마다 결과가 다르다.
      */
     public byte[] encryptBytes(byte[] plain) {
         try {
+            // 1) 매번 새로운 랜덤 IV 생성
             byte[] iv = new byte[IV_BYTES];
             RANDOM.nextBytes(iv);
+            // 2) AES-GCM으로 암호화 (결과 ct에는 암호문 + 인증태그가 함께 들어 있다)
             Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
             cipher.init(Cipher.ENCRYPT_MODE, key, new GCMParameterSpec(TAG_BITS, iv));
             byte[] ct = cipher.doFinal(plain);
+            // 3) [IV][암호문+태그] 순서로 이어 붙인다
             return ByteBuffer.allocate(IV_BYTES + ct.length).put(iv).put(ct).array();
         } catch (GeneralSecurityException e) {
             throw new IllegalStateException("encrypt failed", e);
@@ -86,12 +102,25 @@ public class AesCipher {
     }
 
     /**
-     * {@link #encryptBytes}의 반대. 키가 다르거나 내용이 변조되었으면 IllegalStateException.
+     * {@link #encryptBytes}로 만든 바이트 배열을 원래 평문으로 되돌린다.
+     *
+     * <p>키가 다르거나 암호문이 변조되었으면 복호화에 실패하고 IllegalStateException을 던진다.
+     * GCM 인증 태그로 위변조를 감지한다.</p>
+     *
+     * @param data 암호화된 바이트 배열 (IV 12바이트 + 암호문 + 태그 16바이트)
+     * @return 복호화된 평문 바이트 배열
+     * @throws IllegalStateException 키가 다르거나 암호문이 변조되었으면 실패한다.
      */
     public byte[] decryptBytes(byte[] data) {
         try {
+            // 입력값 길이 검사: 최소한 IV(12) + 태그(16) = 28바이트는 있어야 한다
+            if (data.length < IV_BYTES + 16) {
+                throw new IllegalStateException("decrypt failed");
+            }
             Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            // 앞 12바이트를 IV로 사용
             cipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(TAG_BITS, data, 0, IV_BYTES));
+            // 12바이트 이후 나머지 전체(암호문+태그)를 복호화. 태그가 안 맞으면 여기서 예외 발생
             return cipher.doFinal(data, IV_BYTES, data.length - IV_BYTES);
         } catch (GeneralSecurityException e) {
             throw new IllegalStateException("decrypt failed", e);

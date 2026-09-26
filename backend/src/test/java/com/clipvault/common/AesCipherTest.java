@@ -50,4 +50,11 @@ class AesCipherTest {
         a[a.length - 1] ^= 1;
         assertThrows(IllegalStateException.class, () -> cipher.decryptBytes(a));
     }
+
+    /** 너무 짧은 입력(IV 12 + 태그 16 = 28바이트 미만)은 IllegalStateException을 던진다 */
+    @Test
+    void tooShortInputThrowsIllegalStateException() {
+        AesCipher cipher = new AesCipher(KEY);
+        assertThrows(IllegalStateException.class, () -> cipher.decryptBytes(new byte[5]));
+    }
 }
