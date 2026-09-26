@@ -89,7 +89,7 @@ public class ClipController {
             clip = clips.save(new Clip(me.userId(), me.deviceId(), cipher.encrypt(req.content()), hash, now, now.plus(ttl)));
         }
         // 응답과 알림에는 평문을 담는다 (방금 받은 원문을 그대로 쓰므로 다시 복호화할 필요 없음)
-        ClipResponse body = toResponse(clip, req.content());
+        ClipResponse body = ClipResponse.of(clip, req.content());
         // 같은 사용자의 모든 기기에 실시간 알림 (중복 재복사도 알림을 보낸다 → 다른 기기 목록에서 맨 위로 올라가도록)
         messaging.convertAndSend("/topic/clips/" + me.userId(), body);
         return ResponseEntity.status(duplicate ? HttpStatus.OK : HttpStatus.CREATED).body(body);
@@ -104,7 +104,7 @@ public class ClipController {
     public List<ClipResponse> list(@AuthenticationPrincipal AuthUser me, @RequestParam(defaultValue = "20") int limit) {
         return clips.findByUserIdAndExpiresAtAfterOrderByCreatedAtDesc(me.userId(), Instant.now(), Limit.of(Math.clamp(limit, 1, 100)))
                 // DB의 암호문을 평문으로 복호화해서 응답
-                .stream().map(c -> toResponse(c, cipher.decrypt(c.getContent()))).toList();
+                .stream().map(c -> ClipResponse.of(c, cipher.decrypt(c.getContent()))).toList();
     }
 
     /**
@@ -120,8 +120,4 @@ public class ClipController {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Clip not found")));
     }
 
-    /** 엔티티 + 평문 → 응답 DTO. 엔티티의 content는 암호문이라서 평문을 따로 받는다. */
-    private static ClipResponse toResponse(Clip c, String plain) {
-        return new ClipResponse(c.getId(), plain, c.getContentHash(), c.getSourceDeviceId(), c.getCreatedAt(), c.getExpiresAt());
-    }
 }

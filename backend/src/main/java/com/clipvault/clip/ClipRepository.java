@@ -35,4 +35,8 @@ public interface ClipRepository extends JpaRepository<Clip, UUID> {
     @Modifying
     @Query("delete from Clip c where c.expiresAt <= :now")
     int deleteExpired(@Param("now") Instant now);
+
+    /** 만료된 이미지 클립들의 버킷 키. 행을 지우기 전에 버킷 객체부터 지우는 데 쓴다. */
+    @Query("select c.imageKey from Clip c where c.expiresAt <= :now and c.imageKey is not null")
+    List<String> findExpiredImageKeys(@Param("now") Instant now);
 }

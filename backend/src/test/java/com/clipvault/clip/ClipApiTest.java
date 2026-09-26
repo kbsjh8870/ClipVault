@@ -88,6 +88,8 @@ class ClipApiTest {
         // 만료 - 생성 = 7일(초 단위), 오차 2초 허용
         assertEquals(7 * 24 * 3600, expiresAt.getEpochSecond() - createdAt.getEpochSecond(), 2);
         assertNotNull(read(body, "$.id"));
+        assertEquals("TEXT", read(body, "$.type"));
+        assertNull(read(body, "$.width"));
     }
 
     /**
@@ -189,6 +191,17 @@ class ClipApiTest {
         assertEquals(plain, new AesCipher(KEY).decrypt(raw), "DB value must be AES-GCM(base64) with the configured key");
 
         api.get("/api/clips", dev.accessToken()).andExpect(jsonPath("$[0].content").value(plain));
+    }
+
+    /** 이미지 기능 이전에 저장된 행(type 컬럼이 비어 있음)은 TEXT로 응답해야 한다 */
+    @Test
+    void legacyRowWithoutTypeIsText() throws Exception {
+        String id = read(api.createClip(dev.accessToken(), "old row", 201), "$.id");
+        jdbc.update("update " + clipTable() + " set type = null where cast(id as varchar) = ?", id);
+        api.get("/api/clips", dev.accessToken())
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].id").value(id))
+                .andExpect(jsonPath("$[0].type").value("TEXT"));
     }
 
     /** 만료된 클립은 목록에서 숨겨지고, 정리 배치는 만료된 것만 삭제하고 삭제 건수를 돌려준다 */
