@@ -26,6 +26,8 @@ public class Session {
     public volatile String deviceId = PREFS.get("deviceId", null);
     /** 서버 주소. 예: https://161-33-167-228.sslip.io (로컬 개발 시 http://localhost:8080) */
     public volatile String server = defaultServer();
+    /** "일시정지" 메뉴 상태. 앱을 다시 켜도 유지되도록 저장한다 (로그아웃해도 지우지 않음). */
+    public volatile boolean paused = PREFS.getBoolean("paused", false);
 
     /**
      * 서버 주소를 정하는 우선순위:
@@ -52,9 +54,10 @@ public class Session {
         put("userId", userId);
         put("deviceId", deviceId);
         put("server", server);
+        PREFS.putBoolean("paused", paused);
     }
 
-    /** 로그아웃: 토큰과 ID를 지운다. 서버 주소는 다음 로그인 때 편하도록 남겨 둔다. */
+    /** 로그아웃: 토큰과 ID를 지운다. 서버 주소와 일시정지 설정은 다음 로그인 때 편하도록 남겨 둔다. */
     public synchronized void clear() {
         accessToken = refreshToken = userId = deviceId = null;
         save();

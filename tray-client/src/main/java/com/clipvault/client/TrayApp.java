@@ -58,8 +58,8 @@ public class TrayApp {
     private TrayIcon icon;
     /** 로그인(기기 등록) 되어 있는지 */
     private volatile boolean loggedIn;
-    /** "일시정지" 메뉴가 켜져 있으면 복사해도 업로드하지 않는다 (비밀번호 복사 등 민감할 때 사용) */
-    private volatile boolean paused;
+    /** "일시정지" 메뉴가 켜져 있으면 복사해도 업로드하지 않는다 (비밀번호 복사 등 민감할 때 사용). 저장된 값으로 시작한다. */
+    private volatile boolean paused = session.paused;
     /** 로그인 창이 이미 떠 있는지 (중복으로 뜨지 않게). EDT에서만 접근. */
     private boolean loginOpen;
     /** 아직 확인하지 않은 새 클립 수 (아이콘의 빨간 점, 툴팁 표시용). EDT에서만 접근. */
@@ -118,7 +118,13 @@ public class TrayApp {
             DeviceDialog.show(api, session.deviceId, this::localLogout);
         });
         CheckboxMenuItem pause = new CheckboxMenuItem("일시정지");
-        pause.addItemListener(e -> { paused = pause.getState(); updateTooltip(); });
+        pause.setState(paused); // 지난번 상태 복원
+        pause.addItemListener(e -> {
+            paused = pause.getState();
+            session.paused = paused;
+            session.save(); // 앱을 다시 켜도 유지되도록 저장
+            updateTooltip();
+        });
         MenuItem logout = new MenuItem("로그아웃");
         logout.addActionListener(e -> logout());
         MenuItem quit = new MenuItem("종료");
@@ -210,7 +216,7 @@ public class TrayApp {
                     // 그래야 감시기가 변화를 감지했을 때 "서버에서 받은 것"이라 업로드하지 않는다.
                     guard.markApplied(text);
                     watcher.write(text);
-                });
+                }, clip -> async(() -> api.deleteClip(clip.path("id").asText()))); // 삭제는 서버에 요청만 보낸다
             });
         });
     }

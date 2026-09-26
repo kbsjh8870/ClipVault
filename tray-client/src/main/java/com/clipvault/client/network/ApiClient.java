@@ -116,6 +116,9 @@ public class ApiClient {
     /** 클립 업로드. */
     public void postClip(String content) { authed("POST", "/api/clips", Map.of("content", content)); }
 
+    /** 클립 한 건 삭제. */
+    public void deleteClip(String id) { authed("DELETE", "/api/clips/" + enc(id), null); }
+
     // --- 내부 동작 ---
 
     /**

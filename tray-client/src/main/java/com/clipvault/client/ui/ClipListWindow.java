@@ -16,6 +16,7 @@ import java.util.function.Consumer;
  *
  * <p>각 항목은 두 줄짜리 카드다: 첫 줄은 내용 미리보기, 둘째 줄은 "3분 전 · 다른 기기" 같은 정보.
  * 항목을 클릭하거나 방향키로 고른 뒤 Enter를 누르면 그 텍스트가 로컬 클립보드에 복사된다(바로 Ctrl+V 가능).
+ * 항목에 마우스를 올리면 오른쪽에 휴지통 아이콘이 나타나고, 그걸 누르거나 Delete 키를 누르면 서버에서 삭제된다.
  * Esc를 누르거나 다른 곳을 클릭하면(포커스를 잃으면) 닫힌다.</p>
  *
  * <p>화면 스레드(EDT)에서 호출해야 한다.</p>
@@ -32,8 +33,10 @@ public class ClipListWindow {
      * @param clips      서버에서 받은 클립 목록(JSON 배열, 최신순)
      * @param myDeviceId 이 PC의 기기 ID ("이 PC"/"다른 기기" 표시용)
      * @param onPick     사용자가 항목을 골랐을 때 호출 (선택한 텍스트 전달) - 로컬 클립보드에 넣는 일은 호출한 쪽이 한다
+     * @param onDelete   사용자가 항목을 삭제했을 때 호출 (삭제한 클립 전달) - 서버 삭제 요청은 호출한 쪽이 한다.
+     *                   목록에서는 즉시 빠진다(서버 응답을 기다리지 않음)
      */
-    public static void show(JsonNode clips, String myDeviceId, Consumer<String> onPick) {
+    public static void show(JsonNode clips, String myDeviceId, Consumer<String> onPick, Consumer<JsonNode> onDelete) {
         if (open != null) open.dispose(); // 이미 떠 있던 팝업은 닫고 새로 띄운다
         DefaultListModel<JsonNode> model = new DefaultListModel<>();
         for (JsonNode c : clips) model.addElement(c);
@@ -41,7 +44,8 @@ public class ClipListWindow {
         JList<JsonNode> list = new JList<>(model);
         list.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
         list.setOpaque(false);
-        int[] hover = {-1}; // 마우스가 올라가 있는 항목 번호 (-1 = 없음)
+        // hover[0] = 마우스가 올라가 있는 항목 번호 (-1 = 없음), hover[1] = 1이면 그 항목의 휴지통 위에 있음
+        int[] hover = {-1, 0};
         list.setCellRenderer(new ClipCell(myDeviceId, hover));
         // 칸 너비를 고정해야 긴 텍스트가 가로 스크롤을 만들지 않고 "…"으로 잘린다
         list.setFixedCellWidth(WIDTH - 24);
@@ -56,16 +60,40 @@ public class ClipListWindow {
             d.dispose();
             if (c != null) onPick.accept(c.path("content").asText());
         };
+        JLabel count = Theme.pill(model.size() + "개", Theme.selected(), Theme.ACCENT);
+        JPanel root = new JPanel(new BorderLayout());
+        // 삭제 처리: 목록에서 바로 빼고, 개수 배지를 고치고, 호출한 쪽에 알린다. 다 지우면 "비어 있음" 화면으로 바꾼다.
+        java.util.function.IntConsumer delete = i -> {
+            if (i < 0 || i >= model.size()) return;
+            JsonNode c = model.remove(i);
+            hover[0] = -1;
+            onDelete.accept(c);
+            count.setText(model.size() + "개");
+            if (model.isEmpty()) {
+                int bottom = d.getY() + d.getHeight(); // 팝업 아래쪽(트레이 쪽) 위치를 유지한 채 크기만 줄인다
+                root.remove(1);
+                root.add(emptyState(), BorderLayout.CENTER);
+                count.getParent().setVisible(false);
+                d.pack();
+                d.setLocation(d.getX(), bottom - d.getHeight());
+            } else {
+                list.setSelectedIndex(Math.min(i, model.size() - 1)); // 키보드로 연달아 지울 수 있게 다음 항목 선택
+            }
+        };
         MouseAdapter mouse = new MouseAdapter() {
-            /** 클릭 = 선택 (빈 공간 클릭은 무시) */
+            /** 클릭 = 선택, 단 휴지통 영역(오른쪽 끝)을 누르면 삭제 (빈 공간 클릭은 무시) */
             @Override public void mouseClicked(MouseEvent e) {
-                if (list.locationToIndex(e.getPoint()) >= 0) pick.run();
+                int i = list.locationToIndex(e.getPoint());
+                if (i < 0) return;
+                if (overTrash(list, i, e.getPoint())) delete.accept(i); else pick.run();
             }
 
-            /** 마우스가 움직이면 올라가 있는 항목을 기억해서 배경을 살짝 칠한다 */
+            /** 마우스가 움직이면 올라가 있는 항목(과 휴지통 위인지)을 기억해서 배경과 아이콘을 칠한다 */
             @Override public void mouseMoved(MouseEvent e) {
                 int i = list.locationToIndex(e.getPoint());
-                if (i != hover[0]) { hover[0] = i; list.repaint(); }
+                int t = i >= 0 && overTrash(list, i, e.getPoint()) ? 1 : 0;
+                if (i != hover[0] || t != hover[1]) { hover[0] = i; hover[1] = t; list.repaint(); }
+                list.setToolTipText(t == 1 ? "삭제" : null);
             }
 
             @Override public void mouseExited(MouseEvent e) {
@@ -79,6 +107,11 @@ public class ClipListWindow {
         list.getInputMap().put(KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, 0), "pick");
         list.getActionMap().put("pick", new AbstractAction() {
             @Override public void actionPerformed(java.awt.event.ActionEvent e) { pick.run(); }
+        });
+        // Delete = 선택한 항목 삭제
+        list.getInputMap().put(KeyStroke.getKeyStroke(KeyEvent.VK_DELETE, 0), "delete");
+        list.getActionMap().put("delete", new AbstractAction() {
+            @Override public void actionPerformed(java.awt.event.ActionEvent e) { delete.accept(list.getSelectedIndex()); }
         });
         // Esc = 닫기
         list.getInputMap().put(KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0), "close");
@@ -100,13 +133,12 @@ public class ClipListWindow {
         title.setIconTextGap(8);
         header.add(title, BorderLayout.WEST);
         if (!model.isEmpty()) {
-            JLabel count = Theme.pill(model.size() + "개", Theme.selected(), Theme.ACCENT);
             JPanel right = new JPanel(new GridBagLayout()); // 세로 가운데 정렬용
             right.setOpaque(false);
             right.add(count);
             header.add(right, BorderLayout.EAST);
         }
-        JLabel hint = new JLabel("클릭하면 클립보드에 복사됩니다");
+        JLabel hint = new JLabel("클릭: 복사   ·   휴지통 / Delete 키: 삭제");
         hint.setFont(Theme.font(11f, Font.PLAIN));
         hint.setForeground(Theme.muted());
         hint.setBorder(BorderFactory.createEmptyBorder(4, 26, 0, 0));
@@ -129,7 +161,6 @@ public class ClipListWindow {
             body = scroll;
         }
 
-        JPanel root = new JPanel(new BorderLayout());
         root.setBorder(BorderFactory.createLineBorder(Theme.border())); // 팝업 가장자리 얇은 선
         root.add(header, BorderLayout.NORTH);
         root.add(body, BorderLayout.CENTER);
@@ -149,6 +180,39 @@ public class ClipListWindow {
         d.setVisible(true);
         d.toFront();
         list.requestFocusInWindow(); // 바로 방향키/Enter로 조작할 수 있게 포커스
+    }
+
+    /** 휴지통 영역 너비(px). 각 칸의 오른쪽 끝 이만큼이 삭제 버튼 역할을 한다. */
+    private static final int TRASH_W = 40;
+
+    /** 마우스 위치가 i번째 칸의 휴지통 영역(오른쪽 끝) 안인지. */
+    private static boolean overTrash(JList<?> list, int i, Point p) {
+        Rectangle r = list.getCellBounds(i, i);
+        return r != null && r.contains(p) && p.x >= r.x + r.width - TRASH_W;
+    }
+
+    /** 코드로 그린 작은 휴지통 아이콘. 색은 상황에 따라(평소 회색, 마우스 올리면 빨강) 바꿔 그린다. */
+    private static final class TrashIcon implements Icon {
+        Color color = Color.GRAY;
+
+        @Override public void paintIcon(Component c, Graphics g, int x, int y) {
+            Graphics2D g2 = (Graphics2D) g.create();
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            g2.setColor(color);
+            g2.setStroke(new BasicStroke(1.6f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+            g2.drawLine(x + 2, y + 4, x + 14, y + 4);        // 뚜껑
+            g2.drawLine(x + 6, y + 4, x + 6, y + 2);         // 손잡이
+            g2.drawLine(x + 6, y + 2, x + 10, y + 2);
+            g2.drawLine(x + 10, y + 2, x + 10, y + 4);
+            g2.drawRoundRect(x + 4, y + 5, 8, 10, 2, 2);     // 통
+            g2.drawLine(x + 7, y + 8, x + 7, y + 12);        // 세로줄
+            g2.drawLine(x + 9, y + 8, x + 9, y + 12);
+            g2.dispose();
+        }
+
+        @Override public int getIconWidth() { return 16; }
+
+        @Override public int getIconHeight() { return 16; }
     }
 
     /** 클립이 하나도 없을 때 보여 줄 안내. */
@@ -190,6 +254,9 @@ public class ClipListWindow {
         private final JLabel mine = Theme.pill("이 PC", Theme.dark ? new Color(0x3F3F46) : new Color(0xE4E4E7), Theme.muted());
         private final JLabel other = Theme.pill("다른 기기", Theme.selected(), Theme.ACCENT);
         private final JPanel meta = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        private final TrashIcon trashIcon = new TrashIcon();
+        /** 오른쪽 휴지통 자리. 마우스가 올라간 칸에서만 아이콘을 보여 주고, 평소엔 빈 자리로 두어 글자 폭이 흔들리지 않게 한다. */
+        private final JLabel trash = new JLabel();
 
         ClipCell(String myDeviceId, int[] hover) {
             this.myDeviceId = myDeviceId;
@@ -200,8 +267,14 @@ public class ClipListWindow {
             time.setForeground(Theme.muted());
             meta.setOpaque(false);
             ((FlowLayout) meta.getLayout()).setHgap(0);
-            panel.add(text, BorderLayout.CENTER);
-            panel.add(meta, BorderLayout.SOUTH);
+            JPanel textCol = new JPanel(new BorderLayout(0, 4));
+            textCol.setOpaque(false);
+            textCol.add(text, BorderLayout.CENTER);
+            textCol.add(meta, BorderLayout.SOUTH);
+            trash.setPreferredSize(new Dimension(TRASH_W - 14, 16));
+            trash.setHorizontalAlignment(SwingConstants.RIGHT);
+            panel.add(textCol, BorderLayout.CENTER);
+            panel.add(trash, BorderLayout.EAST);
         }
 
         @Override
@@ -216,6 +289,10 @@ public class ClipListWindow {
             meta.removeAll();
             meta.add(time);
             meta.add(fromMe ? mine : other);
+            // 휴지통: 마우스가 올라간 칸에만 표시, 휴지통 바로 위면 빨간색
+            boolean hovered = index == hover[0];
+            trashIcon.color = hovered && hover[1] == 1 ? Theme.DANGER : Theme.muted();
+            trash.setIcon(hovered ? trashIcon : null);
             // 선택 > 마우스오버 > 없음 순서로 배경 결정
             panel.fill = selected ? Theme.selected() : index == hover[0] ? Theme.hover() : null;
             return panel;

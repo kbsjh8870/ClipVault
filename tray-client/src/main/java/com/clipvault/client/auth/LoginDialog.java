@@ -54,11 +54,27 @@ public class LoginDialog {
         signup.putClientProperty("JButton.buttonType", "borderless");
         signup.setForeground(Theme.ACCENT);
         signup.setFont(Theme.font(12f, Font.BOLD));
-        // 서버 주소 입력줄은 접어 두었다가 필요할 때만 펼친다 (대부분의 사용자는 바꿀 일이 없음)
-        JButton serverToggle = new JButton("서버 설정 ▸");
+        // 지금 어느 서버에 접속하려는지 항상 보여 준다 (서버를 잘못 골라 "계정이 없다"고 헷갈리는 일을 막기 위해).
+        // 주소 입력줄 자체는 접어 두었다가 "변경"을 누를 때만 펼친다 (대부분의 사용자는 바꿀 일이 없음)
+        JLabel serverInfo = new JLabel();
+        serverInfo.setFont(Theme.font(11f, Font.PLAIN));
+        JButton serverToggle = new JButton("변경");
         serverToggle.putClientProperty("JButton.buttonType", "borderless");
-        serverToggle.setForeground(Theme.muted());
-        serverToggle.setFont(Theme.font(11f, Font.PLAIN));
+        serverToggle.setForeground(Theme.ACCENT);
+        serverToggle.setFont(Theme.font(11f, Font.BOLD));
+        Runnable refreshServerInfo = () -> {
+            String url = server.getText().trim();
+            boolean local = isLocal(url);
+            serverInfo.setText("접속 서버 · " + host(url) + (local ? "  (이 PC 전용)" : ""));
+            // localhost는 다른 PC와 동기화되지 않으므로 주황색으로 눈에 띄게 표시
+            serverInfo.setForeground(local ? new Color(0xF59E0B) : Theme.muted());
+        };
+        refreshServerInfo.run();
+        server.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
+            @Override public void insertUpdate(javax.swing.event.DocumentEvent e) { refreshServerInfo.run(); }
+            @Override public void removeUpdate(javax.swing.event.DocumentEvent e) { refreshServerInfo.run(); }
+            @Override public void changedUpdate(javax.swing.event.DocumentEvent e) { refreshServerInfo.run(); }
+        });
         JLabel serverLabel = fieldLabel("서버 주소");
         serverLabel.setVisible(false);
         server.setVisible(false);
@@ -91,19 +107,23 @@ public class LoginDialog {
         s.add(status, 12, 0);
         s.add(login, 6, 0);
 
-        // 아래쪽: "계정이 없으신가요? 회원가입"   ...   "서버 설정 ▸"
-        JPanel bottom = new JPanel(new BorderLayout());
-        bottom.setOpaque(false);
-        JPanel signupRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        // 아래쪽: "계정이 없으신가요? 회원가입"
+        JPanel signupRow = new JPanel(new FlowLayout(FlowLayout.CENTER, 0, 0));
         signupRow.setOpaque(false);
         JLabel noAccount = new JLabel("계정이 없으신가요?");
         noAccount.setForeground(Theme.muted());
         noAccount.setFont(Theme.font(12f, Font.PLAIN));
         signupRow.add(noAccount);
         signupRow.add(signup);
-        bottom.add(signupRow, BorderLayout.WEST);
-        bottom.add(serverToggle, BorderLayout.EAST);
-        s.add(bottom, 10, 0);
+        s.add(signupRow, 8, 0);
+
+        // 맨 아래: 구분선 + "접속 서버 · 호스트  변경"
+        s.add(new JSeparator(), 10, 0);
+        JPanel serverRow = new JPanel(new FlowLayout(FlowLayout.CENTER, 0, 0));
+        serverRow.setOpaque(false);
+        serverRow.add(serverInfo);
+        serverRow.add(serverToggle);
+        s.add(serverRow, 6, 0);
 
         d.setContentPane(root);
         d.getRootPane().setDefaultButton(login); // 엔터 키 = 로그인 (FlatLaf가 기본 버튼을 강조색으로 칠해 준다)
@@ -112,7 +132,8 @@ public class LoginDialog {
             boolean show = !server.isVisible();
             serverLabel.setVisible(show);
             server.setVisible(show);
-            serverToggle.setText(show ? "서버 설정 ▾" : "서버 설정 ▸");
+            serverToggle.setText(show ? "닫기" : "변경");
+            if (show) server.requestFocusInWindow();
             d.pack();
         });
 
@@ -150,8 +171,7 @@ public class LoginDialog {
                             d.dispose(); // 창 닫기 → show()의 setVisible(true)가 풀린다
                         } catch (Exception ex) {
                             Throwable c = ex.getCause() != null ? ex.getCause() : ex;
-                            showStatus(status, c instanceof ApiClient.ApiException ae && ae.status == 401
-                                    ? "이메일 또는 비밀번호가 올바르지 않습니다." : "실패: " + c.getMessage(), true);
+                            showStatus(status, errorMessage(c, isSignup, url), true);
                             login.setEnabled(true);
                             signup.setEnabled(true);
                         }
@@ -167,6 +187,41 @@ public class LoginDialog {
         return ok[0];
     }
 
+    /**
+     * 실패 원인을 사용자가 이해할 수 있는 문장으로 바꾼다. 어느 서버에서 실패했는지도 함께 알려 준다.
+     * (예: 다른 서버에 가입해 놓고 이 서버로 로그인하면 "계정이 없다"가 나오므로 서버 이름이 단서가 된다)
+     */
+    private static String errorMessage(Throwable c, boolean isSignup, String url) {
+        String h = host(url);
+        if (c instanceof ApiClient.ApiException ae) {
+            if (ae.status == 401) return "계정이 없거나 비밀번호가 틀렸습니다.\n서버: " + h;
+            if (ae.status == 409) return "이미 가입된 이메일입니다.\n로그인 버튼을 눌러 주세요.";
+            if (ae.status == 400) return isSignup ? "이메일 형식과 비밀번호(8자 이상)를\n확인해 주세요." : "입력값을 확인해 주세요.";
+            return "서버 오류가 발생했습니다 (" + ae.status + ").\n잠시 후 다시 시도해 주세요.";
+        }
+        if (c instanceof java.io.UncheckedIOException || c instanceof IllegalArgumentException) {
+            return "서버에 연결할 수 없습니다.\n서버: " + h;
+        }
+        return "실패: " + c.getMessage();
+    }
+
+    /** "https://host:port/..." 에서 사람이 읽기 좋은 "host[:port]" 부분만 꺼낸다. 형식이 이상하면 그대로. */
+    private static String host(String url) {
+        try {
+            java.net.URI u = java.net.URI.create(url);
+            if (u.getHost() == null) return url;
+            return u.getPort() > 0 ? u.getHost() + ":" + u.getPort() : u.getHost();
+        } catch (Exception e) {
+            return url;
+        }
+    }
+
+    /** 이 PC 자신을 가리키는 주소인지 (다른 PC와는 동기화되지 않는다). */
+    private static boolean isLocal(String url) {
+        String h = host(url);
+        return h.startsWith("localhost") || h.startsWith("127.") || h.startsWith("[::1]");
+    }
+
     /** 입력칸 위의 작은 굵은 라벨. */
     private static JLabel fieldLabel(String text) {
         JLabel l = new JLabel(text);
@@ -177,6 +232,8 @@ public class LoginDialog {
     /** 상태줄 문구. 에러면 빨간색, 진행 중이면 회색. */
     private static void showStatus(JLabel status, String text, boolean error) {
         status.setForeground(error ? Theme.DANGER : Theme.muted());
+        // 여러 줄(\n) 문구를 표시하려고 HTML로 감싼다. 줄은 코드에서 직접 나눠서 한글이 단어 중간에서 끊기지 않게 한다.
+        text = "<html>" + text.replace("&", "&amp;").replace("<", "&lt;").replace("\n", "<br>") + "</html>";
         status.setText(text);
     }
 
