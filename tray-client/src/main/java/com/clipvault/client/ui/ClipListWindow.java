@@ -28,7 +28,7 @@ import java.util.function.Consumer;
  * <p>각 항목은 두 줄짜리 카드다: 첫 줄은 내용 미리보기, 둘째 줄은 "3분 전 · 다른 기기" 같은 정보.
  * 항목을 클릭하거나 방향키로 고른 뒤 Enter를 누르면 그 텍스트가 로컬 클립보드에 복사된다(바로 Ctrl+V 가능).
  * 항목에 마우스를 올리면 오른쪽에 휴지통 아이콘이 나타나고, 그걸 누르거나 Delete 키를 누르면 서버에서 삭제된다.
- * 휴지통 왼쪽의 핀을 누르면 고정(즐겨찾기)된다: 고정한 클립은 만료되지 않고 목록 맨 위에 모인다 (최대 10개, 텍스트만).
+ * 휴지통 왼쪽의 핀을 누르면 고정(즐겨찾기)된다: 고정한 클립은 만료되지 않고 목록 맨 위에 모인다 (최대 10개).
  * 목록은 {@link #PAGE}개씩 받아 오고, 더 있으면 맨 끝의 "더 보기" 줄로 다음 페이지를 이어 붙인다.
  * 팝업이 떠 있는 동안 다른 PC에서 복사한 클립은 {@link #push}로 바로 목록에 들어온다.
  * Esc를 누르거나 다른 곳을 클릭하면(포커스를 잃으면) 닫힌다.</p>
@@ -174,11 +174,11 @@ public class ClipListWindow {
             d.dispose();
             onPick.accept(c);
         };
-        // 고정/해제: 목록에서 바로 바꾸고(고정은 맨 위로) 호출한 쪽에 알린다. 이미지는 고정할 수 없다(버킷에서 지워지므로).
+        // 고정/해제: 목록에서 바로 바꾸고(고정은 맨 위로) 호출한 쪽에 알린다.
         java.util.function.IntConsumer togglePin = i -> {
             if (i < 0 || i >= model.size()) return;
             JsonNode c = model.get(i);
-            if (!pinnable(c)) return;
+            if (!isClip(c)) return;
             boolean on = !c.path("pinned").asBoolean();
             if (on && all.stream().filter(x -> x.path("pinned").asBoolean()).count() >= MAX_PINNED) {
                 flash(hint, "고정은 최대 " + MAX_PINNED + "개까지 할 수 있어요");
@@ -409,11 +409,6 @@ public class ClipListWindow {
                 .findFirst().orElse(null);
     }
 
-    /** 고정할 수 있는 항목인지: 진짜 클립이고 이미지가 아니어야 한다. */
-    private static boolean pinnable(JsonNode c) {
-        return isClip(c) && !"IMAGE".equals(c.path("type").asText());
-    }
-
     /** 안내 문구 자리에 잠깐(3초) 다른 문구를 보여 준다. */
     private static void flash(JLabel hint, String text) {
         hint.setText(text);
@@ -440,7 +435,7 @@ public class ClipListWindow {
         if (r == null || !r.contains(p) || !isClip(c)) return 0;
         int right = r.x + r.width;
         if (p.x >= right - TRASH_W) return TRASH;
-        if (p.x >= right - TRASH_W - PIN_W && pinnable(c)) return PIN;
+        if (p.x >= right - TRASH_W - PIN_W) return PIN;
         return 0;
     }
 
@@ -669,11 +664,11 @@ public class ClipListWindow {
             boolean hovered = index == hover[0];
             trashIcon.color = hovered && hover[1] == 1 ? Theme.DANGER : Theme.muted();
             trash.setIcon(hovered ? trashIcon : null);
-            // 핀: 고정된 클립은 항상(강조색, 속 채움), 아니면 마우스가 올라간 칸에만. 이미지는 고정할 수 없어 없음.
+            // 핀: 고정된 클립은 항상(강조색, 속 채움), 아니면 마우스가 올라간 칸에만.
             boolean pinned = clip.path("pinned").asBoolean();
             pinIcon.filled = pinned;
             pinIcon.color = pinned || (hovered && hover[1] == PIN) ? Theme.ACCENT : Theme.muted();
-            pin.setIcon(pinnable(clip) && (pinned || hovered) ? pinIcon : null);
+            pin.setIcon(pinned || hovered ? pinIcon : null);
             // 선택 > 마우스오버 > 없음 순서로 배경 결정
             panel.fill = selected ? Theme.selected() : index == hover[0] ? Theme.hover() : null;
             return panel;

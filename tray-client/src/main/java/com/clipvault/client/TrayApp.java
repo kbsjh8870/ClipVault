@@ -205,10 +205,10 @@ public class TrayApp {
                 icon.displayMessage("ClipVault", "자동 실행 설정을 바꾸지 못했습니다: " + ex.getMessage(), TrayIcon.MessageType.WARNING);
             }
         });
-        // 보관 기간: 서버의 사용자 설정. 로그인하면 현재 값에 체크된다 (이미지는 버킷 규칙 때문에 최대 7일)
+        // 보관 기간: 서버의 사용자 설정. 로그인하면 현재 값에 체크된다 (텍스트, 이미지 모두)
         JMenu ttl = new JMenu("보관 기간");
         for (int days : new int[]{1, 3, 7, 30}) {
-            JRadioButtonMenuItem item = new JRadioButtonMenuItem(days == 30 ? "30일 (이미지는 7일)" : days + "일");
+            JRadioButtonMenuItem item = new JRadioButtonMenuItem(days + "일");
             item.addActionListener(e -> changeTtl(days));
             ttlGroup.add(item);
             ttlItems.put(days, item);

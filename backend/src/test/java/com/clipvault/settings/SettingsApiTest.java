@@ -20,7 +20,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * 사용자별 보관 기간 설정 통합 테스트.
  *
  * <p>허용 값은 1·3·7·30일(기본 7일). 바꾸면 새 클립뿐 아니라 기존 클립의 만료 시각도 "생성 시각 + 새 기간"으로
- * 다시 계산한다(고정 클립 제외). 이미지는 버킷 수명 주기 규칙 때문에 최대 7일.</p>
+ * 다시 계산한다(고정 클립 제외). 이미지도 같은 기간을 따른다.</p>
  */
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -87,17 +87,16 @@ class SettingsApiTest {
         assertEquals(Duration.ofDays(7).toSeconds(), lifeOf(pinned), 2, "pinned clip keeps its original expiry");
     }
 
-    /** 이미지는 30일로 해도 최대 7일 (새 이미지, 기존 이미지 다시 계산 모두) */
+    /** 이미지도 텍스트와 같은 기간 (새 이미지, 기존 이미지 다시 계산 모두) */
     @Test
-    void imagesAreCappedAtSevenDays() throws Exception {
+    void imagesFollowUserTtl() throws Exception {
         setTtl(30, 204);
         String img = api.postImage(dev.accessToken(), Api.png(8, 8, 0x445566))
                 .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString();
-        assertEquals(Duration.ofDays(7).toSeconds(), life(img), 2);
+        assertEquals(Duration.ofDays(30).toSeconds(), life(img), 2);
 
-        setTtl(1, 204);
-        setTtl(30, 204); // 다시 늘려도 이미지는 7일
-        assertEquals(Duration.ofDays(7).toSeconds(), lifeOf(read(img, "$.id")), 2);
+        setTtl(3, 204);
+        assertEquals(Duration.ofDays(3).toSeconds(), lifeOf(read(img, "$.id")), 2);
     }
 
     /** 사용자별: 다른 사람 설정은 영향 없음 */

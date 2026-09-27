@@ -8,7 +8,6 @@ import com.clipvault.storage.ImageStore;
 import jakarta.servlet.http.HttpServletRequest;
 import java.awt.Dimension;
 import java.io.IOException;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
 import org.slf4j.Logger;
@@ -56,12 +55,6 @@ public class ImageClipController {
     private final SimpMessagingTemplate messaging;
     private final UserRepository users;
 
-    /**
-     * 이미지 클립의 최대 보관 기간. 버킷 수명 주기 규칙(8일 뒤 객체 삭제)보다 짧아야 목록에 있는 동안 파일이 사라지지 않는다.
-     * 사용자가 30일을 골라도 이미지는 7일까지만.
-     */
-    public static final Duration MAX_IMAGE_TTL = Duration.ofDays(7);
-
     public ImageClipController(ClipRepository clips, AesCipher cipher, ImageStore store, SimpMessagingTemplate messaging,
                                UserRepository users) {
         this.clips = clips;
@@ -69,11 +62,6 @@ public class ImageClipController {
         this.store = store;
         this.messaging = messaging;
         this.users = users;
-    }
-
-    /** 이미지 보관 기간 = 사용자 설정과 {@link #MAX_IMAGE_TTL} 중 짧은 쪽. */
-    public static Duration imageTtl(Duration userTtl) {
-        return userTtl.compareTo(MAX_IMAGE_TTL) < 0 ? userTtl : MAX_IMAGE_TTL;
     }
 
     /** 이미지 업로드. 신규 201, 가장 최근 클립과 같은 이미지면 시각만 갱신하고 200. */
@@ -103,7 +91,7 @@ public class ImageClipController {
         Instant now = Instant.now();
         Clip latest = clips.findFirstByUserIdOrderByCreatedAtDesc(me.userId()).orElse(null);
         if (latest != null && latest.getContentHash().equals(hash) && renewObjects(latest)) {
-            latest.refresh(me.deviceId(), now, now.plus(imageTtl(users.clipTtl(me.userId()))));
+            latest.refresh(me.deviceId(), now, now.plus(users.clipTtl(me.userId())));
             Clip saved = clips.save(latest);
             return push(me, ClipResponse.of(saved, cipher.decrypt(saved.getContent())), HttpStatus.OK);
         }
@@ -131,7 +119,7 @@ public class ImageClipController {
         Clip saved;
         try {
             saved = clips.save(Clip.image(me.userId(), me.deviceId(), cipher.encrypt(label), hash, key,
-                    dim.width, dim.height, png.length, now, now.plus(imageTtl(users.clipTtl(me.userId())))));
+                    dim.width, dim.height, png.length, now, now.plus(users.clipTtl(me.userId()))));
         } catch (RuntimeException e) {
             deleteQuietly(store, key);
             throw e;
@@ -152,23 +140,36 @@ public class ImageClipController {
     }
 
     /**
-     * 중복 업로드로 만료를 7일 늘릴 때, 버킷 객체도 다시 써서 생성 시각을 새로 한다.
-     * 버킷 수명 주기 규칙은 객체 생성 8일 뒤에 지우므로, 그대로 두면 클립은 살아 있는데 객체만 사라진다.
+     * 중복 업로드로 만료를 늘릴 때, 버킷 객체도 다시 써서 생성 시각을 새로 한다.
      * 텍스트 클립은 할 일이 없어 true. 객체가 이미 없으면 false → 새 클립(새 키)으로 저장하게 한다.
+     *
+     * @throws ResponseStatusException 503 저장소 오류
      */
     private boolean renewObjects(Clip c) {
         if (c.getImageKey() == null) return true;
         try {
-            byte[] image = store.get(IMAGES + c.getImageKey());
-            byte[] thumb = store.get(THUMBS + c.getImageKey());
-            if (image == null || thumb == null) return false;
-            store.put(IMAGES + c.getImageKey(), image);
-            store.put(THUMBS + c.getImageKey(), thumb);
-            return true;
+            return renew(store, c.getImageKey());
         } catch (RuntimeException e) {
             log.error("Image storage failed", e);
             throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "Image storage unavailable");
         }
+    }
+
+    /**
+     * 이미지 클립의 두 객체(원본, 썸네일)를 같은 내용으로 다시 써서 버킷의 생성 시각을 지금으로 바꾼다.
+     * 버킷 수명 주기 규칙은 객체 생성 31일 뒤에 지우므로(최대 보관 기간 30일 + 하루),
+     * 클립을 더 오래 보여 줘야 할 때(중복 업로드, 고정, 고정 해제) 부른다.
+     *
+     * @return 두 객체가 있어서 다시 썼으면 true, 하나라도 이미 없으면 false (아무것도 쓰지 않음)
+     * @throws RuntimeException 저장소 오류 (호출한 쪽이 처리)
+     */
+    public static boolean renew(ImageStore store, String imageKey) {
+        byte[] image = store.get(IMAGES + imageKey);
+        byte[] thumb = store.get(THUMBS + imageKey);
+        if (image == null || thumb == null) return false;
+        store.put(IMAGES + imageKey, image);
+        store.put(THUMBS + imageKey, thumb);
+        return true;
     }
 
     /** 이미지 클립의 두 객체(원본, 썸네일)를 지운다. 실패해도 예외 없이 로그만 (남은 객체는 버킷 수명 주기 규칙이 정리). */

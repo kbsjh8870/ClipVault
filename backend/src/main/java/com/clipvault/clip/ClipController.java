@@ -45,6 +45,8 @@ import org.springframework.web.server.ResponseStatusException;
 @RequestMapping("/api/clips")
 public class ClipController {
 
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(ClipController.class);
+
     /** 업로드 요청. 공백만 있는 문자열은 안 되고, 최대 10만 자. */
     public record UploadRequest(@NotBlank @Size(max = 100_000) String content) {
     }
@@ -129,9 +131,12 @@ public class ClipController {
     /**
      * 즐겨찾기 고정. 204 No Content. 이미 고정돼 있으면 아무것도 안 하고 204.
      *
-     * @throws ResponseStatusException 404 클립이 없거나 다른 사람의 클립,
-     *         400 이미지 클립 (버킷 수명 주기 규칙이 파일을 지워서 고정해도 이미지가 사라진다),
-     *         409 이미 10개를 고정함
+     * <p><b>이미지 클립</b>: 버킷 수명 주기 규칙(객체 생성 31일 뒤 삭제) 때문에 고정만 해서는 파일이 결국 사라진다.
+     * 그래서 고정하는 순간 객체를 다시 써서 생성 시각을 새로 하고, 그 뒤로는 매일 정리 배치가 다시 쓴다
+     * ({@link ClipCleanupJob#renewPinnedImages}).</p>
+     *
+     * @throws ResponseStatusException 404 클립이 없거나 다른 사람의 클립, 또는 이미지 파일이 이미 없음,
+     *         409 이미 10개를 고정함, 503 이미지 저장소 오류
      */
     // ponytail(의도적 단순화): 개수 확인과 저장 사이에 잠금이 없어 두 기기에서 동시에 고정하면 11개가 될 수 있다. 해가 없어 그대로 둔다.
     @PutMapping("/{id}/pin")
@@ -139,23 +144,45 @@ public class ClipController {
     public void pin(@AuthenticationPrincipal AuthUser me, @PathVariable UUID id) {
         Clip clip = owned(me, id);
         if (clip.isPinned()) return;
-        if (clip.getType() == ClipType.IMAGE) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Image clips cannot be pinned");
-        }
         if (clips.countByUserIdAndPinnedTrue(me.userId()) >= MAX_PINNED) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "At most " + MAX_PINNED + " clips can be pinned");
         }
+        if (clip.getImageKey() != null) renewForPin(clip.getImageKey());
         clip.pin();
         clips.save(clip);
     }
 
-    /** 고정 해제. 204 No Content. 만료 시각은 지금부터 보관 기간(사용자 설정) 뒤로 다시 잡는다. 404는 {@link #pin}과 같다. */
+    /**
+     * 고정 해제. 204 No Content. 만료 시각은 지금부터 보관 기간(사용자 설정) 뒤로 다시 잡는다.
+     * 이미지는 객체도 다시 써서 그 기간(최대 30일, 버킷 규칙 31일) 동안 파일이 남아 있게 한다 (실패해도 해제는 진행, 로그만). 404는 {@link #pin}과 같다.
+     */
     @DeleteMapping("/{id}/pin")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void unpin(@AuthenticationPrincipal AuthUser me, @PathVariable UUID id) {
         Clip clip = owned(me, id);
-        clip.unpin(Instant.now().plus(users.clipTtl(me.userId())));
+        if (!clip.isPinned()) return;
+        Duration ttl = users.clipTtl(me.userId());
+        if (clip.getImageKey() != null) {
+            try {
+                ImageClipController.renew(store, clip.getImageKey());
+            } catch (RuntimeException e) {
+                log.warn("Failed to renew image objects on unpin {}", clip.getImageKey(), e);
+            }
+        }
+        clip.unpin(Instant.now().plus(ttl));
         clips.save(clip);
+    }
+
+    /** 고정할 이미지의 객체를 다시 쓴다. 파일이 이미 없으면 404, 저장소 오류면 503 (둘 다 고정하지 않음). */
+    private void renewForPin(String imageKey) {
+        boolean ok;
+        try {
+            ok = ImageClipController.renew(store, imageKey);
+        } catch (RuntimeException e) {
+            log.error("Image storage failed", e);
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "Image storage unavailable");
+        }
+        if (!ok) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Image not found");
     }
 
     /** 내 클립을 찾는다. 없거나 남의 것이면 404 (남의 클립이 "존재한다"는 사실도 알려 주지 않는다). */

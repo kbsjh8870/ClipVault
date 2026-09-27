@@ -5,8 +5,6 @@ import com.clipvault.auth.User;
 import com.clipvault.auth.UserRepository;
 import com.clipvault.clip.Clip;
 import com.clipvault.clip.ClipRepository;
-import com.clipvault.clip.ClipType;
-import com.clipvault.clip.ImageClipController;
 import java.time.Duration;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -52,7 +50,7 @@ public class SettingsController {
      * 설정 변경. 204 No Content.
      *
      * <p><b>기존 클립에도 적용</b>: 고정 안 된 클립의 만료 시각을 모두 "생성 시각 + 새 보관 기간"으로 다시 잡는다
-     * (이미지는 최대 7일). 기간을 줄이면 그보다 오래된 클립은 바로 목록에서 빠지고 다음 정리 배치 때 지워진다.
+     * (이미지도 같다). 기간을 줄이면 그보다 오래된 클립은 바로 목록에서 빠지고 다음 정리 배치 때 지워진다.
      * 민감한 내용을 오래 두기 싫어서 줄인 사용자에게 옛 클립이 계속 남아 있으면 안 되기 때문이다.
      * 고정 클립은 원래 만료되지 않으므로 건드리지 않는다(해제할 때 새 기간이 적용된다).</p>
      *
@@ -72,7 +70,7 @@ public class SettingsController {
         users.save(user);
         Duration ttl = Duration.ofDays(req.clipTtlDays());
         for (Clip c : clips.findByUserIdAndPinnedFalse(me.userId())) {
-            c.expireAfter(c.getType() == ClipType.IMAGE ? ImageClipController.imageTtl(ttl) : ttl);
+            c.expireAfter(ttl);
         }
         // @Transactional 안에서 읽은 엔티티라 값만 바꾸면 커밋할 때 UPDATE가 나간다 (save 불필요)
     }
