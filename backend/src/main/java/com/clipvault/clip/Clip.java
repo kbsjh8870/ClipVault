@@ -13,7 +13,7 @@ import java.time.Instant;
 import java.util.UUID;
 
 /**
- * 클립(복사한 텍스트 한 건) 엔티티. DB의 {@code clips} 테이블 한 행.
+ * 클립(복사한 텍스트 또는 이미지 한 건) 엔티티. DB의 {@code clips} 테이블 한 행.
  *
  * <p>(user_id, created_at) 인덱스: "이 사용자의 최근 클립 N개"를 조회하는 쿼리가 가장 많아서,
  * 이 두 컬럼으로 인덱스를 걸어 전체 테이블을 훑지 않고 빠르게 찾을 수 있게 했다.</p>
@@ -53,7 +53,10 @@ public class Clip {
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 
-    /** 만료 시각(= 생성 시각 + 7일). 지나면 조회에서 빠지고, 매일 도는 배치가 실제로 삭제한다. */
+    /**
+     * 만료 시각(= 생성 시각 + 사용자 보관 기간, 기본 7일). 지나면 조회에서 빠지고, 매일 도는 배치가 실제로 삭제한다.
+     * 고정한 클립은 이 값과 관계없이 남는다 ({@link #pinned}).
+     */
     @Column(name = "expires_at", nullable = false)
     private Instant expiresAt;
 
@@ -131,7 +134,7 @@ public class Clip {
     }
 
     /**
-     * 고정을 푼다. 만료 시각을 새로 잡는다 (보통 지금 + 7일).
+     * 고정을 푼다. 만료 시각을 새로 잡는다 (지금 + 사용자 보관 기간).
      * 오래전에 고정한 클립은 원래 만료 시각이 이미 지났을 수 있어서, 그대로 두면 해제하자마자 사라진다.
      */
     public void unpin(Instant expiresAt) {

@@ -7,7 +7,7 @@
 
 - Gradle 멀티프로젝트, 루트 `./gradlew` 사용. JDK 21. Spring Boot 4.1.x.
 - `:backend` — Spring Boot. 테스트는 H2(PostgreSQL 모드), 운영은 PostgreSQL.
-- `:tray-client` — 순수 Java 21 + Swing. 외부 의존성은 `com.fasterxml.jackson.core:jackson-databind` 하나만 허용.
+- `:tray-client` — 순수 Java 21 + Swing. 외부 의존성은 `jackson-databind`(JSON), `flatlaf`(테마), `jna-platform`(전역 단축키, 레지스트리)만 허용.
   HTTP는 `java.net.http.HttpClient`, WebSocket은 `java.net.http.WebSocket` + 직접 구현한 최소 STOMP.
 
 ## 1. 설정 (backend `application.yml`)
@@ -109,6 +109,9 @@ ClipResponse = {id, type, content, contentHash, sourceDeviceId, createdAt, expir
 ### tray-client
 - `com.clipvault.client.TrayApp` — `main`.
 - `com.clipvault.client.ui.ClipListWindow` — `static boolean matches(JsonNode clip, String query)` (검색), `static void merge(List<JsonNode> all, Iterable<JsonNode> clips)` (ID 중복 제거 + 고정 먼저·최신순 정렬), `public static final int PAGE = 50`.
+- `com.clipvault.client.hotkey.HotKeys` — `public static boolean valid(KeyStroke)` (Ctrl/Alt/Shift 하나 이상 + A–Z/0–9/F1–F12), `static int winModifiers(KeyStroke)` (MOD_ALT=1, MOD_CONTROL=2, MOD_SHIFT=4), `public static String text(KeyStroke)` (예: `Ctrl+Alt+Shift+C`, null이면 `없음`).
+- `com.clipvault.client.update.Updater` — `static boolean isNewer(String latest, String current)` (`x.y.z` 형식만 비교), `static String sha256(Path)`, `static void unzip(Path zip, Path dest)` (zip-slip 방지).
+- `com.clipvault.client.clipboard.Images` — `toArgb`, `key` (픽셀 해시), `toPng`, `fromPng`, `MAX_BYTES = 10MB`.
 - `com.clipvault.client.clipboard.EchoGuard`
   - `public EchoGuard(java.time.Clock clock, java.time.Duration window)`
   - `public void markApplied(String text)` — 서버 클립을 로컬에 반영했을 때 호출

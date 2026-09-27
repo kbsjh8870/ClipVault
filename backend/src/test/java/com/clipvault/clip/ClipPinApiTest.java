@@ -21,7 +21,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 /**
  * 즐겨찾기(고정)와 목록 페이지 넘김(before) 통합 테스트.
  *
- * <p>고정한 클립은 만료되지 않고(목록에서 안 빠지고, 정리 배치가 안 지움), 해제하면 지금부터 7일 뒤 만료로 돌아간다.
+ * <p>고정한 클립은 만료되지 않고(목록에서 안 빠지고, 정리 배치가 안 지움), 해제하면 지금부터 보관 기간(기본 7일) 뒤 만료로 돌아간다.
  * 사용자당 최대 10개. 이미지 고정은 {@link ImagePinTest}.</p>
  */
 @SpringBootTest
@@ -67,7 +67,7 @@ class ClipPinApiTest {
                 .andExpect(jsonPath("$[0].id").value(id));
     }
 
-    /** 해제 → 204, pinned=false, 만료 시각이 지금부터 7일 뒤로 다시 잡힌다 (오래된 클립이 바로 사라지지 않게) */
+    /** 해제 → 204, pinned=false, 만료 시각이 지금부터 보관 기간(기본 7일) 뒤로 다시 잡힌다 (오래된 클립이 바로 사라지지 않게) */
     @Test
     void unpinResetsExpiry() throws Exception {
         String id = clip("was pinned");

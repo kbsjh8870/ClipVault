@@ -11,8 +11,9 @@ import org.springframework.transaction.annotation.Transactional;
 /**
  * 만료된 클립을 DB에서 실제로 지우는 배치 작업.
  *
- * <p>클립은 7일이 지나면 조회 결과에서는 바로 빠지지만(ClipRepository의 조회 조건),
- * DB에는 남아 있다. 이 작업이 하루에 한 번 돌면서 그런 행들을 물리적으로 삭제한다.
+ * <p>클립은 보관 기간(사용자 설정, 기본 7일)이 지나면 조회 결과에서는 바로 빠지지만(ClipRepository의 조회 조건),
+ * DB에는 남아 있다. 이 작업이 하루에 한 번 돌면서 그런 행들을 물리적으로 삭제한다(고정한 클립은 제외).
+ * 같은 시각에 고정한 이미지의 버킷 객체도 다시 써서 수명 주기 규칙에 지워지지 않게 한다({@link #renewPinnedImages}).
  * 민감한 복사 내용이 서버에 무기한 쌓이지 않게 하기 위한 것이다(PRD: TTL 경과 후 24시간 이내 삭제).</p>
  *
  * <p>실행 시각은 application.yml의 {@code clipvault.clip.cleanup-cron} (기본 {@code "0 0 4 * * *"} = 매일 새벽 4시).

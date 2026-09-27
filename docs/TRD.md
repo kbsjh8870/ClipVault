@@ -50,7 +50,8 @@ clipvault/
 │   ├── src/main/java/com/clipvault/
 │   │   ├── auth/           # 회원가입/로그인, JWT 발급/검증
 │   │   ├── device/         # 기기 등록/조회/삭제
-│   │   ├── clip/           # 클립 업로드/조회/삭제, 중복 처리, TTL 배치
+│   │   ├── clip/           # 클립 업로드/조회/삭제, 이미지, 고정, 중복 처리, TTL 배치
+│   │   ├── settings/       # 사용자 설정 API (보관 기간)
 │   │   ├── websocket/      # STOMP 설정, 인증 인터셉터, push 로직
 │   │   ├── storage/        # ImageStore(S3ImageStore/LocalImageStore), StorageConfig
 │   │   ├── config/         # SecurityConfig, WebSocketConfig 등
@@ -64,9 +65,11 @@ clipvault/
 │   ├── src/main/java/com/clipvault/client/
 │   │   ├── clipboard/      # ClipboardWatcher, EchoGuard(재업로드 방지)
 │   │   ├── network/        # ApiClient(REST), ClipSocket(WebSocket), StompFrame
-│   │   ├── ui/             # Theme, 클립 목록 팝업, 기기 관리 창
+│   │   ├── ui/             # Theme, 클립 목록 팝업(검색·고정·더 보기), 기기 관리 창, 단축키 설정 창
 │   │   ├── auth/           # 로그인 창, Session(토큰/설정 저장)
-│   │   └── update/         # Updater(새 버전 확인/설치), update.ps1(폴더 교체 스크립트)
+│   │   ├── hotkey/         # HotKeys(JNA RegisterHotKey 전역 단축키)
+│   │   ├── update/         # Updater(새 버전 확인/설치), update.ps1(폴더 교체 스크립트)
+│   │   └── AutoStart.java  # 윈도우 시작 시 실행 (HKCU Run 키)
 │   ├── packaging/          # ClipVault.ico
 │   └── build.gradle        # packageApp/packageZip (jpackage)
 ├── deploy/                 # 운영용 docker-compose.prod.yml, Caddyfile, .env.example
@@ -84,6 +87,7 @@ clipvault/
 | email | varchar, unique | 로그인 아이디 |
 | password_hash | varchar | bcrypt 등 |
 | created_at | timestamp | |
+| clip_ttl_days | int, 기본 7 | 클립 보관 기간(일). 1·3·7·30 중 하나 |
 
 ### Device
 | 필드 | 타입 | 설명 |
@@ -105,7 +109,8 @@ clipvault/
 | content | text (암호화 저장) | 클립 내용 |
 | content_hash | varchar | 중복 방지용 (동일 내용 재복사 시 timestamp만 갱신) |
 | created_at | timestamp | |
-| expires_at | timestamp | TTL 계산값 |
+| expires_at | timestamp | created_at(또는 갱신 시각) + 사용자 보관 기간 |
+| pinned | boolean, 기본 false | 즐겨찾기(고정). true면 만료 조회·정리 배치에서 제외 |
 | type | varchar(10), null 허용 | `TEXT` / `IMAGE`. null은 TEXT(기존 행 호환) |
 | image_key | varchar(64), null | 버킷 객체 이름용 무작위 UUID. 이미지 클립만 |
 | width, height | int, null | 원본 픽셀 크기. 이미지 클립만 |
@@ -131,8 +136,14 @@ clipvault/
 
 ### 5.3 클립
 - `POST /api/clips` — { content } → 신규 201 / 직전 클립과 같은 내용이면 200 (source_device는 인증 컨텍스트에서 식별)
-- `GET /api/clips?limit=20` — 최근 클립 목록 조회
+- `POST /api/clips/image` — PNG 바이트 → 신규 201 / 직전 이미지와 같으면 200 (서버가 썸네일 생성, 원본·썸네일 암호화 후 버킷 저장)
+- `GET /api/clips?limit=50&before=...` — 최근 클립 목록 조회 (before: 더 보기 기준 시각), `?pinned=true` — 고정 목록
+- `GET /api/clips/{clipId}/image`, `/thumbnail` — 이미지 원본/썸네일
+- `PUT` / `DELETE /api/clips/{clipId}/pin` — 고정/해제 (최대 10개)
 - `DELETE /api/clips/{clipId}` — 개별 삭제
+
+### 5.3.1 설정
+- `GET` / `PUT /api/settings` — { clipTtlDays } 보관 기간 조회/변경 (1·3·7·30, 기존 클립에도 적용)
 
 ### 5.4 실시간(WebSocket, STOMP)
 - 연결: `WS /ws` (JWT를 CONNECT 헤더로 인증)
@@ -144,7 +155,8 @@ clipvault/
 ### 6.1 클립보드 감지 (트레이 앱)
 - `java.awt.Toolkit.getDefaultToolkit().getSystemClipboard()`에 `FlavorListener` 등록
 - FlavorListener는 데이터 종류가 바뀔 때만 호출되므로(텍스트→텍스트 복사는 감지 못 함) 1초 간격 폴링을 함께 사용
-- 텍스트(`DataFlavor.stringFlavor`)만 우선 처리, 이미지/파일은 무시
+- 텍스트(`DataFlavor.stringFlavor`)를 먼저 보고, 없으면 이미지(`imageFlavor`)를 PNG로 올린다. 파일 목록(탐색기 복사)은 무시
+- 이미지는 픽셀 해시로 같은 이미지인지 판단하고, 읽기가 50ms 넘게 걸리면 이미지 확인 간격을 3초로 늦춘다
 - 자기 자신이 방금 반영한 클립(서버에서 받아 로컬에 붙여넣은 경우)이 다시 캡처되어 무한 루프로 재업로드되지 않도록, 서버에서 받아 반영한 텍스트는 5초 동안 업로드 대상에서 제외(`EchoGuard`). 직전에 업로드한 텍스트와 같아도 제외
 - "일시정지" 중에는 업로드하지 않음 (상태는 재시작 후에도 유지)
 
@@ -153,8 +165,9 @@ clipvault/
 - 같은 사용자의 가장 최근 클립과 해시가 같으면 새 레코드 생성 대신 `created_at`/`expires_at`만 갱신
 
 ### 6.3 TTL 및 배치 삭제
-- `expires_at`은 생성 시 `created_at + 기본 보관기간`으로 계산
-- `@Scheduled` 배치 잡(예: 매일 1회)이 만료된 Clip을 일괄 삭제
+- `expires_at`은 생성(또는 중복 갱신) 시 `지금 + 사용자 보관 기간`으로 계산. 기간을 바꾸면 고정 안 된 기존 클립도 `created_at + 새 기간`으로 다시 계산
+- 고정한 클립은 만료 조회와 배치 삭제에서 제외. 해제하면 `지금 + 보관 기간`으로 다시 잡는다
+- `@Scheduled` 배치 잡(매일 새벽 4시)이 만료된 Clip을 일괄 삭제(이미지 객체 먼저 삭제)하고, 고정한 이미지의 버킷 객체를 다시 써서 수명 주기 규칙(31일)에 지워지지 않게 한다
 
 ### 6.4 보안
 - 비밀번호: bcrypt 해시 저장
@@ -179,6 +192,9 @@ clipvault/
 | 라이브러리 | JDK `java.net.http` | 트레이 앱의 REST/WebSocket 통신 | 외부 라이브러리 없음 |
 | 라이브러리 | Jackson Databind | 트레이 앱 JSON 처리 | |
 | 라이브러리 | FlatLaf 3.7 | 트레이 앱 UI 테마 | |
+| 라이브러리 | JNA 5.17 (jna-platform) | 트레이 앱 전역 단축키(RegisterHotKey), 자동 실행(레지스트리) | Windows 전용 |
+| 라이브러리 | AWS SDK v2 (S3) | 이미지 저장 (Oracle Object Storage S3 호환 API) | |
+| 인프라 | Oracle Object Storage | 이미지 원본·썸네일 저장 | 비공개 버킷, 수명 주기 규칙 31일 |
 | (선택, v1 제외 가능) | 이메일 발송 서비스 | 회원가입 인증 메일 | v1은 이메일 인증 없이 즉시 가입 처리, 필요 시 추후 추가 |
 
 ## 8. 배포 방법

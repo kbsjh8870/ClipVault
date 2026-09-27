@@ -42,7 +42,12 @@ import java.util.concurrent.Executors;
  *   <li>{@link EchoGuard}: 업로드해도 되는지 판단 (서버에서 받은 걸 되돌려 보내지 않기)</li>
  *   <li>{@link ClipSocket}: 서버 실시간 알림 수신 → {@link #onPush}, 재연결 시 {@link #onConnected}</li>
  *   <li>{@link Updater}: 하루에 한 번 새 버전 확인 → 메뉴에 "업데이트" 항목 표시</li>
+ *   <li>{@link HotKeys}: 전역 단축키 (최근 클립, 일시정지)</li>
+ *   <li>{@link AutoStart}: 윈도우 시작 시 자동 실행 (레지스트리 Run 키)</li>
+ *   <li>{@link ClipListWindow}: 최근 클립 팝업 (검색, 고정, 더 보기, 떠 있는 동안 실시간 추가 → {@link ClipListWindow#push})</li>
  * </ul>
+ *
+ * <p>보관 기간과 고정은 서버에 저장되는 사용자 설정이라 모든 PC에 같이 적용된다. 트레이 메뉴는 서버 값을 보여 주고 바꿀 뿐이다.</p>
  *
  * <p><b>스레드 규칙</b> (Swing 프로그램의 기본 규칙)</p>
  * <ul>
@@ -59,7 +64,10 @@ public class TrayApp {
     /** 서버에서 받아 로컬에 넣은 텍스트는 5초 동안 다시 업로드하지 않는다. */
     private final EchoGuard guard = new EchoGuard(Clock.systemUTC(), Duration.ofSeconds(5));
     private final ClipboardWatcher watcher = new ClipboardWatcher(this::onLocalCopy, this::onLocalImage);
-    /** 받아 온 썸네일 (클립 id → 이미지). 목록은 최근 20개만 보이므로 최근 50개만 메모리에 두고 오래된 것부터 버린다. */
+    /**
+     * 받아 온 썸네일 (클립 id → 이미지). 목록 창은 화면에 보이는 칸의 썸네일만 요청하므로
+     * 최근 50개만 메모리에 두고 가장 오래 안 쓴 것부터 버린다 (더 보기로 넘어가면 다시 받는다).
+     */
     private final Map<String, Image> thumbs = Collections.synchronizedMap(new LinkedHashMap<>(64, 0.75f, true) {
         @Override
         protected boolean removeEldestEntry(Map.Entry<String, Image> eldest) {
