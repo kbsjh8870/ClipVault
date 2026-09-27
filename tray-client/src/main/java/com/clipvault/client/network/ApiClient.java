@@ -112,7 +112,18 @@ public class ApiClient {
     // --- 클립 ---
 
     /** 최근 클립 목록 (최신순, 최대 limit개). */
-    public JsonNode listClips(int limit) { return authed("GET", "/api/clips?limit=" + limit, null); }
+    public JsonNode listClips(int limit) { return listClips(limit, null); }
+
+    /** before(ISO 시각)보다 먼저 만들어진 클립을 최신순으로 최대 limit개 ("더 보기"). before가 null이면 최근 것부터. */
+    public JsonNode listClips(int limit, String before) {
+        return authed("GET", "/api/clips?limit=" + limit + (before == null ? "" : "&before=" + enc(before)), null);
+    }
+
+    /** 고정(즐겨찾기)한 클립 전체 (최대 10개). */
+    public JsonNode listPinned() { return authed("GET", "/api/clips?pinned=true", null); }
+
+    /** 클립 고정(on=true) 또는 해제. 고정 개수 초과면 409, 이미지면 400. */
+    public void pin(String id, boolean on) { authed(on ? "PUT" : "DELETE", "/api/clips/" + enc(id) + "/pin", null); }
 
     /** 클립 업로드. */
     public void postClip(String content) { authed("POST", "/api/clips", Map.of("content", content)); }

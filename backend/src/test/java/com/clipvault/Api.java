@@ -66,6 +66,13 @@ public class Api {
         return mvc.perform(req);
     }
 
+    /** 본문 없는 PUT 요청. */
+    public ResultActions put(String url, String token) throws Exception {
+        var req = MockMvcRequestBuilders.put(url);
+        if (token != null) req.header("Authorization", "Bearer " + token);
+        return mvc.perform(req);
+    }
+
     /** DELETE 요청. */
     public ResultActions delete(String url, String token) throws Exception {
         var req = MockMvcRequestBuilders.delete(url);
