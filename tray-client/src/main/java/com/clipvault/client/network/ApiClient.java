@@ -109,6 +109,14 @@ public class ApiClient {
     /** 기기 원격 로그아웃. */
     public void deleteDevice(String id) { authed("DELETE", "/api/devices/" + enc(id), null); }
 
+    // --- 설정 ---
+
+    /** 사용자 설정 ({"clipTtlDays": 7} 등). */
+    public JsonNode getSettings() { return authed("GET", "/api/settings", null); }
+
+    /** 클립 보관 기간(일) 변경. 1·3·7·30 중 하나, 아니면 400. 기존 클립에도 적용된다. */
+    public void putSettings(int clipTtlDays) { authed("PUT", "/api/settings", Map.of("clipTtlDays", clipTtlDays)); }
+
     // --- 클립 ---
 
     /** 최근 클립 목록 (최신순, 최대 limit개). */

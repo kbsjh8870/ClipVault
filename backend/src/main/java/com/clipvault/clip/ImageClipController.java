@@ -1,6 +1,7 @@
 package com.clipvault.clip;
 
 import com.clipvault.auth.AuthUser;
+import com.clipvault.auth.UserRepository;
 import com.clipvault.common.AesCipher;
 import com.clipvault.common.HashUtil;
 import com.clipvault.storage.ImageStore;
@@ -12,7 +13,6 @@ import java.time.Instant;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -54,15 +54,26 @@ public class ImageClipController {
     private final AesCipher cipher;
     private final ImageStore store;
     private final SimpMessagingTemplate messaging;
-    private final Duration ttl;
+    private final UserRepository users;
+
+    /**
+     * 이미지 클립의 최대 보관 기간. 버킷 수명 주기 규칙(8일 뒤 객체 삭제)보다 짧아야 목록에 있는 동안 파일이 사라지지 않는다.
+     * 사용자가 30일을 골라도 이미지는 7일까지만.
+     */
+    public static final Duration MAX_IMAGE_TTL = Duration.ofDays(7);
 
     public ImageClipController(ClipRepository clips, AesCipher cipher, ImageStore store, SimpMessagingTemplate messaging,
-                               @Value("${clipvault.clip.ttl}") Duration ttl) {
+                               UserRepository users) {
         this.clips = clips;
         this.cipher = cipher;
         this.store = store;
         this.messaging = messaging;
-        this.ttl = ttl;
+        this.users = users;
+    }
+
+    /** 이미지 보관 기간 = 사용자 설정과 {@link #MAX_IMAGE_TTL} 중 짧은 쪽. */
+    public static Duration imageTtl(Duration userTtl) {
+        return userTtl.compareTo(MAX_IMAGE_TTL) < 0 ? userTtl : MAX_IMAGE_TTL;
     }
 
     /** 이미지 업로드. 신규 201, 가장 최근 클립과 같은 이미지면 시각만 갱신하고 200. */
@@ -92,7 +103,7 @@ public class ImageClipController {
         Instant now = Instant.now();
         Clip latest = clips.findFirstByUserIdOrderByCreatedAtDesc(me.userId()).orElse(null);
         if (latest != null && latest.getContentHash().equals(hash) && renewObjects(latest)) {
-            latest.refresh(me.deviceId(), now, now.plus(ttl));
+            latest.refresh(me.deviceId(), now, now.plus(imageTtl(users.clipTtl(me.userId()))));
             Clip saved = clips.save(latest);
             return push(me, ClipResponse.of(saved, cipher.decrypt(saved.getContent())), HttpStatus.OK);
         }
@@ -120,7 +131,7 @@ public class ImageClipController {
         Clip saved;
         try {
             saved = clips.save(Clip.image(me.userId(), me.deviceId(), cipher.encrypt(label), hash, key,
-                    dim.width, dim.height, png.length, now, now.plus(ttl)));
+                    dim.width, dim.height, png.length, now, now.plus(imageTtl(users.clipTtl(me.userId())))));
         } catch (RuntimeException e) {
             deleteQuietly(store, key);
             throw e;

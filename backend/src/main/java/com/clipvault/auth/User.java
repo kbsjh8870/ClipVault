@@ -36,6 +36,16 @@ public class User {
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 
+    /**
+     * 클립 보관 기간(일). {@link #TTL_CHOICES} 중 하나. 기존 행에는 기본값 7이 들어가도록 컬럼 기본값을 둔다
+     * (ddl-auto: update가 컬럼을 추가할 때).
+     */
+    @Column(name = "clip_ttl_days", nullable = false, columnDefinition = "integer default 7")
+    private int clipTtlDays = 7;
+
+    /** 고를 수 있는 보관 기간(일). 짧게(민감한 내용)부터 한 달까지. */
+    public static final java.util.Set<Integer> TTL_CHOICES = java.util.Set.of(1, 3, 7, 30);
+
     /** JPA가 DB에서 읽어 온 값으로 객체를 만들 때 쓰는 기본 생성자. 직접 호출하지 않도록 protected로 막아 둔다. */
     protected User() {
     }
@@ -56,4 +66,8 @@ public class User {
     public String getEmail() { return email; }
     public String getPasswordHash() { return passwordHash; }
     public Instant getCreatedAt() { return createdAt; }
+    public int getClipTtlDays() { return clipTtlDays; }
+
+    /** 보관 기간을 바꾼다. 값 검사(TTL_CHOICES)는 호출하는 쪽(SettingsController)이 한다. */
+    public void setClipTtlDays(int days) { this.clipTtlDays = days; }
 }

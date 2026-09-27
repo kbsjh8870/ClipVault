@@ -22,7 +22,6 @@ clipvault:
     # base64("0123456789abcdef0123456789abcdef") = 32 bytes
     key: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
   clip:
-    ttl: 7d
     cleanup-cron: "0 0 4 * * *"
   storage:
     # 테스트는 버킷 없이 build 폴더 아래에 저장한다

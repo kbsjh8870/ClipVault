@@ -21,7 +21,6 @@
 | `clipvault.jwt.access-ttl` | | `15m` |
 | `clipvault.jwt.refresh-ttl` | | `30d` |
 | `clipvault.crypto.key` | `CLIP_ENCRYPTION_KEY` | 없음(필수, base64 인코딩된 32바이트 AES 키) |
-| `clipvault.clip.ttl` | | `7d` |
 | `clipvault.clip.cleanup-cron` | | `0 0 4 * * *` |
 
 스키마는 `ddl-auto: update` (Flyway 없음).
@@ -52,10 +51,16 @@
 - `GET /api/devices` → `200` `[{id, deviceName, os, lastSeenAt, active}]` (내 기기, active만, lastSeenAt 내림차순)
 - `DELETE /api/devices/{id}` → `204` (active=false, refreshTokenHash=null). 남의 기기 → 404.
 
+### Settings (device 토큰 필수, 사용자 단위)
+- `GET /api/settings` → `200` `{clipTtlDays}` 클립 보관 기간(일). 기본 7.
+- `PUT /api/settings` `{clipTtlDays}` → `204`. 허용 값 1·3·7·30, 그 밖은 `400`.
+  - 기존 클립에도 적용: 고정 안 된 클립의 `expiresAt`을 `createdAt + 새 기간`으로 다시 계산 (줄이면 오래된 클립은 즉시 목록에서 빠짐). 고정 클립은 그대로.
+  - 이미지 클립은 설정과 관계없이 최대 7일 (버킷 수명 주기 규칙 8일보다 짧게).
+
 ### Clips (device 토큰 필수, 아니면 403)
 - `POST /api/clips` `{content}` → 신규 `201` / 중복 `200`, body = ClipResponse
   - content: 공백만 있는 문자열 불가, 최대 100_000자.
-  - 중복: 같은 user의 **가장 최근** 클립과 `contentHash`가 같으면 새 레코드 없이 `createdAt`,`expiresAt`, `sourceDeviceId` 갱신 후 200. 이 경우도 WS push 한다.
+  - 중복: 같은 user의 **가장 최근** 클립과 `contentHash`가 같으면 새 레코드 없이 `createdAt`,`expiresAt`, `sourceDeviceId` 갱신 후 200. `expiresAt` = 지금 + 사용자 보관 기간(이미지는 최대 7일). 이 경우도 WS push 한다.
 - `POST /api/clips/image` (PNG 바이트, `Content-Type: image/png`) → 신규 `201` / 중복 `200`, body = ClipResponse
   - 처리 순서: 크기 확인 (Content-Length ≤ 10MB = 10 × 1024 × 1024, 아니면 `413`) → 본문 읽기 (초과면 `413`) → 이미지 헤더 확인(PNG 형식, 픽셀 ≤ 5천만, 아니면 `400`) → 해시 계산 → 최근 클립과 같으면 시각 갱신 `200` 푸시 → 새 내용이면 썸네일 생성 → 원본·썸네일 암호화 → 버킷 저장(`503` 실패) → DB 저장(실패 시 객체 삭제 후 500) → `201` 푸시.
   - 이미지 한도: PNG 바이트 10MB, 픽셀 5천만(가로×세로).
@@ -68,7 +73,7 @@
 - `DELETE /api/clips/{id}` → `204`. 이미지 클립이면 버킷 객체(원본·썸네일)도 삭제(실패는 로그만). 남의 클립 → 404.
 - `PUT /api/clips/{id}/pin` → `204` 고정(즐겨찾기). 이미 고정이면 그대로 `204`. 이미지 클립 → `400`(버킷 수명 주기 규칙이 파일을 지우므로), 이미 10개 고정 → `409`, 남의 클립 → `404`.
   - 고정한 클립은 만료 시각이 지나도 목록에 남고 `ClipCleanupJob`이 지우지 않는다.
-- `DELETE /api/clips/{id}/pin` → `204` 고정 해제. 만료 시각을 지금 + ttl(7일)로 다시 잡는다. 고정 안 된 클립이면 변화 없이 `204`. 남의 클립 → `404`.
+- `DELETE /api/clips/{id}/pin` → `204` 고정 해제. 만료 시각을 지금 + 사용자 보관 기간으로 다시 잡는다. 고정 안 된 클립이면 변화 없이 `204`. 남의 클립 → `404`.
 
 ```
 ClipResponse = {id, type, content, contentHash, sourceDeviceId, createdAt, expiresAt, width, height, size, pinned}

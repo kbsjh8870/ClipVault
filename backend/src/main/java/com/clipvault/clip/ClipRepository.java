@@ -30,6 +30,9 @@ public interface ClipRepository extends JpaRepository<Clip, UUID> {
     /** 사용자의 고정 클립 전체 (최신순). 최대 10개라 페이지 넘김이 필요 없다. */
     List<Clip> findByUserIdAndPinnedTrueOrderByCreatedAtDesc(UUID userId);
 
+    /** 사용자의 고정 안 된 클립 전체. 보관 기간을 바꿨을 때 만료 시각을 다시 계산하는 데 쓴다. */
+    List<Clip> findByUserIdAndPinnedFalse(UUID userId);
+
     /** 사용자의 고정 클립 개수 (10개 제한 확인용). */
     long countByUserIdAndPinnedTrue(UUID userId);
 

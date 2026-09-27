@@ -140,6 +140,11 @@ public class Clip {
         this.expiresAt = expiresAt;
     }
 
+    /** 만료 시각을 "생성 시각 + ttl"로 다시 잡는다. 사용자가 보관 기간을 바꿨을 때 기존 클립에 적용한다. */
+    public void expireAfter(java.time.Duration ttl) {
+        this.expiresAt = createdAt.plus(ttl);
+    }
+
     public UUID getId() { return id; }
     public UUID getUserId() { return userId; }
     public UUID getSourceDeviceId() { return sourceDeviceId; }

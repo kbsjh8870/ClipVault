@@ -96,6 +96,11 @@ public class TrayApp {
     /** 단축키 표시를 갱신하려고 기억해 두는 항목들. EDT에서만 접근. */
     private JMenuItem clipsItem;
     private JCheckBoxMenuItem pauseItem;
+    /** "보관 기간" 하위 메뉴의 항목들 (일 수 → 항목). 서버 설정을 받으면 해당 항목에 체크한다. EDT에서만 접근. */
+    private final Map<Integer, JRadioButtonMenuItem> ttlItems = new LinkedHashMap<>();
+    private final ButtonGroup ttlGroup = new ButtonGroup();
+    /** 서버에 저장된 보관 기간(일). 아직 모르면 0. EDT에서만 접근. */
+    private int ttlDays;
     /** "업데이트 (v1.2.3)" 메뉴 항목. 새 버전이 없으면 null. EDT에서만 접근. */
     private JMenuItem updateItem;
     /** 설치할 새 버전 정보. EDT에서만 접근. */
@@ -200,6 +205,15 @@ public class TrayApp {
                 icon.displayMessage("ClipVault", "자동 실행 설정을 바꾸지 못했습니다: " + ex.getMessage(), TrayIcon.MessageType.WARNING);
             }
         });
+        // 보관 기간: 서버의 사용자 설정. 로그인하면 현재 값에 체크된다 (이미지는 버킷 규칙 때문에 최대 7일)
+        JMenu ttl = new JMenu("보관 기간");
+        for (int days : new int[]{1, 3, 7, 30}) {
+            JRadioButtonMenuItem item = new JRadioButtonMenuItem(days == 30 ? "30일 (이미지는 7일)" : days + "일");
+            item.addActionListener(e -> changeTtl(days));
+            ttlGroup.add(item);
+            ttlItems.put(days, item);
+            ttl.add(item);
+        }
         JMenuItem keys = new JMenuItem("단축키 설정…");
         keys.addActionListener(e -> HotKeyDialog.show(hotKeys, this::refreshMenuLabels));
         // 현재 버전 (누를 수 없는 회색 항목). IDE에서 실행하면 버전 정보가 없다.
@@ -212,6 +226,7 @@ public class TrayApp {
         menu.add(clips);
         menu.add(devices);
         menu.add(pause);
+        menu.add(ttl);
         menu.add(autoStart);
         menu.add(keys);
         menu.addSeparator();
@@ -332,6 +347,51 @@ public class TrayApp {
         loggedIn = true;
         socket.start();
         SwingUtilities.invokeLater(this::updateTooltip);
+        // 보관 기간 설정을 받아 메뉴에 체크
+        async(() -> {
+            int days = api.getSettings().path("clipTtlDays").asInt();
+            SwingUtilities.invokeLater(() -> selectTtl(days));
+        });
+    }
+
+    /** (EDT) 보관 기간 메뉴에서 days 항목에 체크한다. 모르는 값(0 등)이면 체크를 모두 푼다. */
+    private void selectTtl(int days) {
+        ttlDays = days;
+        JRadioButtonMenuItem item = ttlItems.get(days);
+        if (item != null) item.setSelected(true); else ttlGroup.clearSelection();
+    }
+
+    /**
+     * (EDT) 메뉴에서 보관 기간을 골랐을 때. 서버에 저장하면 기존 클립에도 바로 적용된다.
+     * 줄이는 경우에는 그보다 오래된 클립이 곧바로 사라지므로 먼저 확인을 받는다.
+     */
+    private void changeTtl(int days) {
+        int prev = ttlDays;
+        if (!loggedIn) { selectTtl(prev); showLogin(); return; }
+        if (days == prev) return;
+        if (prev > 0 && days < prev && JOptionPane.showConfirmDialog(null,
+                days + "일보다 오래된 클립은 바로 사라집니다 (고정한 클립은 그대로).\n보관 기간을 " + days + "일로 줄일까요?",
+                "보관 기간 변경", JOptionPane.OK_CANCEL_OPTION, JOptionPane.WARNING_MESSAGE) != JOptionPane.OK_OPTION) {
+            selectTtl(prev); // 취소: 체크를 원래대로
+            return;
+        }
+        selectTtl(days);
+        async(() -> {
+            try {
+                api.putSettings(days);
+            } catch (ApiClient.ApiException e) {
+                if (e.status == 401) throw e;
+                SwingUtilities.invokeLater(() -> {
+                    selectTtl(prev);
+                    icon.displayMessage("ClipVault", "보관 기간을 바꾸지 못했습니다: " + e.getMessage(), TrayIcon.MessageType.WARNING);
+                });
+            } catch (RuntimeException e) {
+                SwingUtilities.invokeLater(() -> {
+                    selectTtl(prev);
+                    icon.displayMessage("ClipVault", "서버에 연결하지 못해 보관 기간을 바꾸지 못했습니다.", TrayIcon.MessageType.WARNING);
+                });
+            }
+        });
     }
 
     /**
@@ -342,6 +402,7 @@ public class TrayApp {
         loggedIn = false;
         socket.stop();
         updateTooltip();
+        selectTtl(0); // 로그아웃 상태에서는 설정을 모른다
         if (loginOpen) return;
         loginOpen = true;
         try {
