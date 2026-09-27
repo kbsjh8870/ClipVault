@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.UUID;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Limit;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
@@ -21,6 +22,7 @@ import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -33,8 +35,10 @@ import org.springframework.web.server.ResponseStatusException;
  *
  * <ul>
  *   <li>{@code POST /api/clips} - 복사한 텍스트 업로드 + 다른 기기에 실시간 알림</li>
- *   <li>{@code GET /api/clips?limit=20} - 최근 클립 목록</li>
+ *   <li>{@code GET /api/clips?limit=20&before=...} - 최근 클립 목록 (before: 더 보기 기준 시각)</li>
+ *   <li>{@code GET /api/clips?pinned=true} - 고정한 클립 전체</li>
  *   <li>{@code DELETE /api/clips/{id}} - 클립 한 건 삭제</li>
+ *   <li>{@code PUT/DELETE /api/clips/{id}/pin} - 즐겨찾기 고정/해제</li>
  * </ul>
  */
 @RestController
@@ -44,6 +48,11 @@ public class ClipController {
     /** 업로드 요청. 공백만 있는 문자열은 안 되고, 최대 10만 자. */
     public record UploadRequest(@NotBlank @Size(max = 100_000) String content) {
     }
+
+    /** 사용자당 고정할 수 있는 클립 수. 고정한 클립은 만료되지 않으므로 무한정 쌓이지 않게 막는다. */
+    static final int MAX_PINNED = 10;
+    /** before를 안 줬을 때 쓰는 "아주 먼 미래" (= 제한 없음). DB 타임스탬프가 담을 수 있는 범위 안의 값. */
+    private static final Instant FAR_FUTURE = Instant.parse("9999-12-31T00:00:00Z");
 
     private final ClipRepository clips;
     private final AesCipher cipher;
@@ -99,15 +108,59 @@ public class ClipController {
     }
 
     /**
-     * 최근 클립 목록 (최신순, 만료된 것 제외).
+     * 최근 클립 목록 (최신순, 만료된 것 제외. 고정한 클립은 만료 시각이 지나도 포함).
      *
-     * @param limit 가져올 개수. 기본 20. 너무 작거나 크게 보내도 1~100 사이로 잘라서(clamp) 쓴다.
+     * @param limit  가져올 개수. 기본 20. 너무 작거나 크게 보내도 1~100 사이로 잘라서(clamp) 쓴다.
+     * @param before 이 시각보다 먼저 만들어진 것만 ("더 보기": 앞 페이지 마지막 항목의 createdAt). 없으면 제한 없음.
+     * @param pinned true면 limit/before를 무시하고 고정한 클립 전체(최대 10개)를 돌려준다.
      */
     @GetMapping
-    public List<ClipResponse> list(@AuthenticationPrincipal AuthUser me, @RequestParam(defaultValue = "20") int limit) {
-        return clips.findByUserIdAndExpiresAtAfterOrderByCreatedAtDesc(me.userId(), Instant.now(), Limit.of(Math.clamp(limit, 1, 100)))
-                // DB의 암호문을 평문으로 복호화해서 응답
-                .stream().map(c -> ClipResponse.of(c, cipher.decrypt(c.getContent()))).toList();
+    public List<ClipResponse> list(@AuthenticationPrincipal AuthUser me, @RequestParam(defaultValue = "20") int limit,
+                                   @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant before,
+                                   @RequestParam(defaultValue = "false") boolean pinned) {
+        List<Clip> found = pinned
+                ? clips.findByUserIdAndPinnedTrueOrderByCreatedAtDesc(me.userId())
+                : clips.findVisible(me.userId(), Instant.now(), before == null ? FAR_FUTURE : before, Limit.of(Math.clamp(limit, 1, 100)));
+        // DB의 암호문을 평문으로 복호화해서 응답
+        return found.stream().map(c -> ClipResponse.of(c, cipher.decrypt(c.getContent()))).toList();
+    }
+
+    /**
+     * 즐겨찾기 고정. 204 No Content. 이미 고정돼 있으면 아무것도 안 하고 204.
+     *
+     * @throws ResponseStatusException 404 클립이 없거나 다른 사람의 클립,
+     *         400 이미지 클립 (버킷 수명 주기 규칙이 파일을 지워서 고정해도 이미지가 사라진다),
+     *         409 이미 10개를 고정함
+     */
+    // ponytail(의도적 단순화): 개수 확인과 저장 사이에 잠금이 없어 두 기기에서 동시에 고정하면 11개가 될 수 있다. 해가 없어 그대로 둔다.
+    @PutMapping("/{id}/pin")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void pin(@AuthenticationPrincipal AuthUser me, @PathVariable UUID id) {
+        Clip clip = owned(me, id);
+        if (clip.isPinned()) return;
+        if (clip.getType() == ClipType.IMAGE) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Image clips cannot be pinned");
+        }
+        if (clips.countByUserIdAndPinnedTrue(me.userId()) >= MAX_PINNED) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "At most " + MAX_PINNED + " clips can be pinned");
+        }
+        clip.pin();
+        clips.save(clip);
+    }
+
+    /** 고정 해제. 204 No Content. 만료 시각은 지금부터 보관 기간(7일) 뒤로 다시 잡는다. 404는 {@link #pin}과 같다. */
+    @DeleteMapping("/{id}/pin")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void unpin(@AuthenticationPrincipal AuthUser me, @PathVariable UUID id) {
+        Clip clip = owned(me, id);
+        clip.unpin(Instant.now().plus(ttl));
+        clips.save(clip);
+    }
+
+    /** 내 클립을 찾는다. 없거나 남의 것이면 404 (남의 클립이 "존재한다"는 사실도 알려 주지 않는다). */
+    private Clip owned(AuthUser me, UUID id) {
+        return clips.findByIdAndUserId(id, me.userId())
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Clip not found"));
     }
 
     /**
@@ -122,8 +175,7 @@ public class ClipController {
     @DeleteMapping("/{id}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void delete(@AuthenticationPrincipal AuthUser me, @PathVariable UUID id) {
-        Clip clip = clips.findByIdAndUserId(id, me.userId())
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Clip not found"));
+        Clip clip = owned(me, id);
         clips.delete(clip);
         // 이미지 클립이면 버킷의 원본·썸네일도 지운다 (실패해도 행 삭제는 유지, 남은 객체는 수명 주기 규칙이 정리)
         if (clip.getImageKey() != null) ImageClipController.deleteQuietly(store, clip.getImageKey());

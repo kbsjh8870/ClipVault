@@ -409,14 +409,43 @@ public class TrayApp {
     private void showClips() {
         if (!loggedIn) { showLogin(); return; }
         async(() -> {
-            JsonNode clips = api.listClips(20);
+            // 고정한 클립(맨 위에 모임) + 최근 첫 페이지
+            JsonNode pinned = api.listPinned();
+            JsonNode clips = api.listClips(ClipListWindow.PAGE);
             SwingUtilities.invokeLater(() -> {
                 unread = 0;
                 updateTooltip();
-                ClipListWindow.show(clips, session.deviceId, this::pick,
+                ClipListWindow.show(pinned, clips, session.deviceId, this::pick,
                         clip -> async(() -> api.deleteClip(clip.path("id").asText())), // 삭제는 서버에 요청만 보낸다
-                        this::thumbnail);
+                        this::pin, this::loadMore, this::thumbnail);
             });
+        });
+    }
+
+    /** 목록에서 핀을 눌렀을 때: 서버에 고정/해제 요청. 실패하면(개수 초과 등) 알림으로 알려 준다 (목록은 다음에 열 때 바로잡힌다). */
+    private void pin(JsonNode clip, boolean on) {
+        async(() -> {
+            try {
+                api.pin(clip.path("id").asText(), on);
+            } catch (ApiClient.ApiException e) {
+                if (e.status == 401) throw e;
+                SwingUtilities.invokeLater(() -> icon.displayMessage("ClipVault",
+                        (on ? "고정" : "고정 해제") + "하지 못했습니다: " + e.getMessage(), TrayIcon.MessageType.WARNING));
+            }
+        });
+    }
+
+    /** 목록의 "더 보기": before 이전 클립 한 페이지를 받아 화면 스레드로 넘긴다. 실패하면 null을 넘긴다. */
+    private void loadMore(String before, java.util.function.Consumer<JsonNode> onPage) {
+        bg.execute(() -> {
+            JsonNode page = null;
+            try {
+                page = api.listClips(ClipListWindow.PAGE, before);
+            } catch (RuntimeException e) {
+                System.err.println("Load more failed: " + e);
+            }
+            JsonNode p = page;
+            SwingUtilities.invokeLater(() -> onPage.accept(p));
         });
     }
 

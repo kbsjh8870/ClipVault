@@ -62,15 +62,21 @@
   - 응답의 `content`는 `[이미지 W×H]` 안내 문구, `width/height/size`는 원본 픽셀·바이트.
 - `GET /api/clips/{id}/image` (image/png) → `200` 복호화한 원본 PNG. 남의 클립, 텍스트 클립, 객체 없음 → `404`.
 - `GET /api/clips/{id}/thumbnail` (image/png) → `200` 복호화한 썸네일 PNG (긴 변 최대 240px, 비율 유지, 원본이 더 작으면 원본 크기). 남의 클립, 텍스트 클립, 객체 없음 → `404`.
-- `GET /api/clips?limit=20` → `200` `[ClipResponse]` createdAt 내림차순, 만료 제외. limit 기본 20, 1~100으로 clamp.
+- `GET /api/clips?limit=20&before=<ISO 시각>` → `200` `[ClipResponse]` createdAt 내림차순, 만료 제외(고정 클립은 만료돼도 포함). limit 기본 20, 1~100으로 clamp.
+  - `before`(선택): 그 시각보다 먼저 만들어진 것만. "더 보기"는 앞 페이지 마지막 항목의 `createdAt`을 넘긴다. 형식이 틀리면 `400`.
+- `GET /api/clips?pinned=true` → `200` `[ClipResponse]` 고정한 클립 전체(최대 10개), createdAt 내림차순. limit/before 무시.
 - `DELETE /api/clips/{id}` → `204`. 이미지 클립이면 버킷 객체(원본·썸네일)도 삭제(실패는 로그만). 남의 클립 → 404.
+- `PUT /api/clips/{id}/pin` → `204` 고정(즐겨찾기). 이미 고정이면 그대로 `204`. 이미지 클립 → `400`(버킷 수명 주기 규칙이 파일을 지우므로), 이미 10개 고정 → `409`, 남의 클립 → `404`.
+  - 고정한 클립은 만료 시각이 지나도 목록에 남고 `ClipCleanupJob`이 지우지 않는다.
+- `DELETE /api/clips/{id}/pin` → `204` 고정 해제. 만료 시각을 지금 + ttl(7일)로 다시 잡는다. 고정 안 된 클립이면 변화 없이 `204`. 남의 클립 → `404`.
 
 ```
-ClipResponse = {id, type, content, contentHash, sourceDeviceId, createdAt, expiresAt, width, height, size}
+ClipResponse = {id, type, content, contentHash, sourceDeviceId, createdAt, expiresAt, width, height, size, pinned}
 ```
 - `type`: `"TEXT"` / `"IMAGE"`. 구버전 null 컬럼은 `"TEXT"`로 응답. 테스트 헬퍼 `Api.postImage(token, bytes)` 참고.
 - 텍스트 클립: `width`, `height`, `size` = null. `content`는 업로드된 평문.
 - 이미지 클립: `width`, `height`, `size`는 원본 픽셀·바이트. `content`는 `[이미지 W×H]` 안내 문구.
+- `pinned`: 고정 여부 (boolean).
 - 시각은 ISO-8601 UTC 문자열(`Instant`). id류는 UUID 문자열.
 - `contentHash` = SHA-256 소문자 hex. 텍스트는 content의 UTF-8 바이트, 이미지는 업로드한 PNG 바이트의 해시.
 - DB의 content는 AES-GCM 암호문(base64, 앞 12바이트 IV). API로는 항상 평문.
@@ -96,6 +102,7 @@ ClipResponse = {id, type, content, contentHash, sourceDeviceId, createdAt, expir
 
 ### tray-client
 - `com.clipvault.client.TrayApp` — `main`.
+- `com.clipvault.client.ui.ClipListWindow` — `static boolean matches(JsonNode clip, String query)` (검색), `static void merge(List<JsonNode> all, Iterable<JsonNode> clips)` (ID 중복 제거 + 고정 먼저·최신순 정렬), `public static final int PAGE = 50`.
 - `com.clipvault.client.clipboard.EchoGuard`
   - `public EchoGuard(java.time.Clock clock, java.time.Duration window)`
   - `public void markApplied(String text)` — 서버 클립을 로컬에 반영했을 때 호출

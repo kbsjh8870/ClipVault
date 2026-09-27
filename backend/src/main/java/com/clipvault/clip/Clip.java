@@ -74,6 +74,13 @@ public class Clip {
     @Column(name = "image_size")
     private Long size;
 
+    /**
+     * 즐겨찾기(고정) 여부. 고정한 클립은 만료 시각이 지나도 목록에서 빠지지 않고 정리 배치도 지우지 않는다.
+     * 기존 행에는 기본값 false가 들어가도록 컬럼 기본값을 둔다 (ddl-auto: update가 컬럼을 추가할 때).
+     */
+    @Column(nullable = false, columnDefinition = "boolean default false")
+    private boolean pinned;
+
     /** JPA 전용 기본 생성자. */
     protected Clip() {
     }
@@ -118,6 +125,21 @@ public class Clip {
         return c;
     }
 
+    /** 고정한다. 만료 시각은 그대로 두고, 조회/정리 쿼리가 pinned를 보고 예외로 처리한다. */
+    public void pin() {
+        this.pinned = true;
+    }
+
+    /**
+     * 고정을 푼다. 만료 시각을 새로 잡는다 (보통 지금 + 7일).
+     * 오래전에 고정한 클립은 원래 만료 시각이 이미 지났을 수 있어서, 그대로 두면 해제하자마자 사라진다.
+     */
+    public void unpin(Instant expiresAt) {
+        if (!pinned) return;
+        this.pinned = false;
+        this.expiresAt = expiresAt;
+    }
+
     public UUID getId() { return id; }
     public UUID getUserId() { return userId; }
     public UUID getSourceDeviceId() { return sourceDeviceId; }
@@ -130,4 +152,5 @@ public class Clip {
     public Integer getWidth() { return width; }
     public Integer getHeight() { return height; }
     public Long getSize() { return size; }
+    public boolean isPinned() { return pinned; }
 }
