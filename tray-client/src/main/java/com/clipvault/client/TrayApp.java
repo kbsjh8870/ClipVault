@@ -574,8 +574,11 @@ public class TrayApp {
         }
         String p = preview; // 람다 안에서 쓰려면 값이 바뀌지 않는(effectively final) 변수여야 한다
         SwingUtilities.invokeLater(() -> {
-            unread++;
-            updateTooltip();
+            // 최근 클립 창이 떠 있으면 그 목록에 바로 넣는다 (보고 있으니 "읽지 않음"으로 세지 않는다)
+            if (!ClipListWindow.push(clip)) {
+                unread++;
+                updateTooltip();
+            }
             icon.displayMessage("새 클립", p, TrayIcon.MessageType.INFO); // 윈도우 알림 풍선
         });
     }
