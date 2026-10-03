@@ -83,8 +83,9 @@ class VaultApiTest {
         api.createClip(dev.accessToken(), "old text", 201);
         String img = api.postImage(dev.accessToken(), Api.png(6, 6, 0x101010))
                 .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString();
+        String imgId = read(img, "$.id");
         String key = jdbc.queryForObject("select image_key from clips where cast(id as varchar) = ?", String.class,
-                read(img, "$.id"));
+                imgId);
         Api.DeviceTokens other = api.newUserWithDevice();
         api.createClip(other.accessToken(), "someone else", 201);
         api.post("/api/vault", dev.accessToken(), body(SALT, 600_000, KEY, null)).andExpect(status().isCreated());
