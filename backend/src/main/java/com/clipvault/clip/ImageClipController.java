@@ -22,10 +22,12 @@ import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RequestPart;
+import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
@@ -262,6 +264,35 @@ public class ImageClipController {
     private ResponseEntity<ClipResponse> push(AuthUser me, ClipResponse body, HttpStatus status) {
         messaging.convertAndSend("/topic/clips/" + me.userId(), body);
         return ResponseEntity.status(status).body(body);
+    }
+
+    /**
+     * 기존 데이터 이전(이미지, multipart: image, thumb, contentHash). 204.
+     * 같은 버킷 키에 암호문을 먼저 덮어쓰고 DB를 바꾼다. 버킷 실패면 503, 행은 옛 상태 그대로(다음에 다시 시도).
+     * 이미 e2e면 아무것도 안 한다.
+     */
+    @PutMapping(path = "/{id}/e2e", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void migrateImage(@AuthenticationPrincipal AuthUser me, @PathVariable UUID id,
+                             @RequestHeader(value = VaultGuard.HEADER, required = false) Integer vaultVersion,
+                             @RequestPart("image") MultipartFile image, @RequestPart("thumb") MultipartFile thumb,
+                             @RequestParam String contentHash) {
+        if (!vaultGuard.e2e(me, vaultVersion)) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Vault required");
+        Clip c = clips.findByIdAndUserId(id, me.userId())
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Clip not found"));
+        if (c.isE2e()) return;
+        if (c.getImageKey() == null) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Not an image clip");
+        E2eInput.hash(contentHash);
+        byte[][] parts = E2eInput.image(image, thumb);
+        try {
+            store.put(IMAGES + c.getImageKey(), parts[0]);
+            store.put(THUMBS + c.getImageKey(), parts[1]);
+        } catch (RuntimeException e) {
+            log.error("Image storage failed", e);
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "Image storage unavailable");
+        }
+        c.convertToE2e("", contentHash);
+        clips.save(c);
     }
 
     private static ResponseStatusException tooLarge() {

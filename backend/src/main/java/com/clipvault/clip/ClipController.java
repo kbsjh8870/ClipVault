@@ -15,6 +15,7 @@ import java.util.UUID;
 import org.springframework.data.domain.Limit;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -142,16 +143,40 @@ public class ClipController {
      * @param limit  가져올 개수. 기본 20. 너무 작거나 크게 보내도 1~100 사이로 잘라서(clamp) 쓴다.
      * @param before 이 시각보다 먼저 만들어진 것만 ("더 보기": 앞 페이지 마지막 항목의 createdAt). 없으면 제한 없음.
      * @param pinned true면 limit/before를 무시하고 고정한 클립 전체(최대 10개)를 돌려준다.
+     * @param legacy true면 옛 행(서버 암호화)만 최대 100개 — 앱의 기존 데이터 이전용, 평문으로 돌려준다
      */
     @GetMapping
     public List<ClipResponse> list(@AuthenticationPrincipal AuthUser me, @RequestParam(defaultValue = "20") int limit,
                                    @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant before,
-                                   @RequestParam(defaultValue = "false") boolean pinned) {
-        List<Clip> found = pinned
+                                   @RequestParam(defaultValue = "false") boolean pinned,
+                                   @RequestParam(defaultValue = "false") boolean legacy) {
+        List<Clip> found = legacy
+                ? clips.findTop100ByUserIdAndE2eFalseOrderByCreatedAtDesc(me.userId())
+                : pinned
                 ? clips.findByUserIdAndPinnedTrueOrderByCreatedAtDesc(me.userId())
                 : clips.findVisible(me.userId(), Instant.now(), before == null ? FAR_FUTURE : before, Limit.of(Math.clamp(limit, 1, 100)));
         // 옛 행은 서버 키로 복호화한 평문, e2e 행은 저장된 암호문 그대로 (앱이 푼다)
         return found.stream().map(c -> ClipResponse.of(c, cipher)).toList();
+    }
+
+    /**
+     * 기존 데이터 이전(텍스트): 옛 행을 같은 자리에서 e2e로 바꾼다. 204.
+     * id·시각·고정 여부는 그대로, content·contentHash를 앱이 암호화한 값으로 바꾼다. 이미 e2e면 아무것도 안 한다(두 PC 동시 이전 대비).
+     *
+     * @throws ResponseStatusException 404 남의 클립, 400 이미지 클립이거나 형식 오류, 426/409 헤더 규칙({@link VaultGuard})
+     */
+    @PutMapping(path = "/{id}/e2e", consumes = MediaType.APPLICATION_JSON_VALUE)
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void migrateText(@AuthenticationPrincipal AuthUser me, @PathVariable UUID id, @RequestBody UploadRequest req,
+                            @RequestHeader(value = VaultGuard.HEADER, required = false) Integer vaultVersion) {
+        if (!vaultGuard.e2e(me, vaultVersion)) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Vault required");
+        Clip clip = owned(me, id);
+        if (clip.isE2e()) return;
+        if (clip.getType() == ClipType.IMAGE) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Use multipart for image clips");
+        E2eInput.text(req.content());
+        E2eInput.hash(req.contentHash());
+        clip.convertToE2e(req.content(), req.contentHash());
+        clips.save(clip);
     }
 
     /**

@@ -52,6 +52,8 @@ public class ClipCleanupJob {
         for (String key : clips.findExpiredImageKeys(now)) ImageClipController.deleteQuietly(store, key);
         int deleted = clips.deleteExpired(now);
         log.info("Deleted {} expired clips", deleted);
+        // 서버 AES 키(CLIP_ENCRYPTION_KEY)는 옛 행(e2e=false)을 읽는 데만 쓴다. 0이 되면 키와 옛 경로를 없앨 수 있다.
+        log.info("Legacy (server-encrypted) clips remaining: {}", clips.countByE2eFalse());
         return deleted;
     }
 

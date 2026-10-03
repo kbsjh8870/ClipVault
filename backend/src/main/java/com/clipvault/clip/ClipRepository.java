@@ -59,6 +59,12 @@ public interface ClipRepository extends JpaRepository<Clip, UUID> {
     @Query("select c.imageKey from Clip c where c.userId = :userId and c.imageKey is not null")
     List<String> findImageKeysByUserId(@Param("userId") UUID userId);
 
+    /** 사용자의 옛 행(서버 암호화, e2e=false) 최신순 최대 100개. 앱이 받아서 e2e로 옮긴다. */
+    List<Clip> findTop100ByUserIdAndE2eFalseOrderByCreatedAtDesc(UUID userId);
+
+    /** 전체 옛 행 개수 (서버 AES 키를 언제 없앨 수 있는지 보려고 매일 로그에 남긴다). */
+    long countByE2eFalse();
+
     /** 사용자의 클립을 모두 지운다 (볼트 초기화). 지운 행 수. */
     @Modifying
     @Query("delete from Clip c where c.userId = :userId")
