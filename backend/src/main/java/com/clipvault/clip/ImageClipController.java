@@ -5,9 +5,11 @@ import com.clipvault.auth.UserRepository;
 import com.clipvault.common.AesCipher;
 import com.clipvault.common.HashUtil;
 import com.clipvault.storage.ImageStore;
+import com.clipvault.vault.VaultGuard;
 import jakarta.servlet.http.HttpServletRequest;
 import java.awt.Dimension;
 import java.io.IOException;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
 import org.slf4j.Logger;
@@ -20,16 +22,21 @@ import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
 
 /**
  * 이미지 클립 API.
  *
  * <ul>
- *   <li>POST /api/clips/image : 본문 = PNG 바이트. 검사 → 썸네일 생성 → 암호화해 버킷 저장 → DB 저장 → 푸시</li>
- *   <li>GET /api/clips/{id}/image, /thumbnail : 버킷에서 꺼내 복호화한 PNG</li>
+ *   <li>POST /api/clips/image (image/png) : 옛 방식(볼트 없음). 본문 = PNG 바이트. 검사 → 썸네일 생성 → 암호화해 버킷 저장 → DB 저장 → 푸시</li>
+ *   <li>POST /api/clips/image (multipart) : e2e. 앱이 암호화한 원본·썸네일을 그대로 버킷 저장 → DB 저장 → 푸시</li>
+ *   <li>GET /api/clips/{id}/image, /thumbnail : 버킷에서 꺼낸 이미지 (옛 행은 서버가 복호화한 PNG, e2e 행은 암호문 그대로)</li>
  * </ul>
  *
  * <p>목록, 삭제, 만료는 텍스트와 같은 {@link ClipController}, {@link ClipCleanupJob}이 처리한다.</p>
@@ -54,9 +61,12 @@ public class ImageClipController {
     private final ImageStore store;
     private final SimpMessagingTemplate messaging;
     private final UserRepository users;
+    /** 업로드가 e2e인지 옛 방식인지 판정 (X-Vault-Version 헤더). */
+    private final VaultGuard vaultGuard;
 
     public ImageClipController(ClipRepository clips, AesCipher cipher, ImageStore store, SimpMessagingTemplate messaging,
-                               UserRepository users) {
+                               UserRepository users, VaultGuard vaultGuard) {
+        this.vaultGuard = vaultGuard;
         this.clips = clips;
         this.cipher = cipher;
         this.store = store;
@@ -68,7 +78,13 @@ public class ImageClipController {
     // ponytail(의도적 단순화): 중복 확인(조회)과 저장 사이에 잠금이 없다. 똑같은 이미지가 정확히 동시에 두 번 올라오면
     // 둘 다 새 클립으로 저장될 수 있다. 클립보드 특성상 거의 일어나지 않고 일어나도 해가 없어서 그대로 둔다.
     @PostMapping(path = "/image", consumes = MediaType.IMAGE_PNG_VALUE)
-    public ResponseEntity<ClipResponse> upload(@AuthenticationPrincipal AuthUser me, HttpServletRequest req) throws IOException {
+    public ResponseEntity<ClipResponse> upload(@AuthenticationPrincipal AuthUser me, HttpServletRequest req,
+                                               @RequestHeader(value = VaultGuard.HEADER, required = false) Integer vaultVersion)
+            throws IOException {
+        // 옛 방식 전용 경로. 볼트가 있으면 426, e2e 앱은 multipart 경로를 써야 한다
+        if (vaultGuard.e2e(me, vaultVersion)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Use multipart upload for end-to-end encrypted images");
+        }
         // 1. 크기: 본문을 읽기 전에 Content-Length로 거절하고, 읽을 때도 한도+1바이트까지만 읽는다
         long length = req.getContentLengthLong();
         if (length < 0 || length > MAX_BYTES) throw tooLarge();
@@ -93,7 +109,7 @@ public class ImageClipController {
         if (latest != null && latest.getContentHash().equals(hash) && renewObjects(latest)) {
             latest.refresh(me.deviceId(), now, now.plus(users.clipTtl(me.userId())));
             Clip saved = clips.save(latest);
-            return push(me, ClipResponse.of(saved, cipher.decrypt(saved.getContent())), HttpStatus.OK);
+            return push(me, ClipResponse.of(saved, cipher), HttpStatus.OK);
         }
 
         // 4. 썸네일을 만들고 원본·썸네일을 암호화해서 버킷에 저장.
@@ -125,6 +141,54 @@ public class ImageClipController {
             throw e;
         }
         return push(me, ClipResponse.of(saved, label), HttpStatus.CREATED);
+    }
+
+    /**
+     * e2e 이미지 업로드 (multipart: image·thumb = 앱이 암호화한 바이트, width, height, contentHash = HMAC hex).
+     * 서버는 PNG 검사·썸네일 생성·암호화를 하지 않고 받은 바이트를 그대로 버킷에 저장한다(풀 수 없으므로).
+     * 저장 순서와 실패 처리(버킷 먼저, DB 실패 시 객체 삭제, 503)는 옛 방식과 같다.
+     */
+    @PostMapping(path = "/image", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<ClipResponse> uploadE2e(@AuthenticationPrincipal AuthUser me,
+                                                  @RequestHeader(value = VaultGuard.HEADER, required = false) Integer vaultVersion,
+                                                  @RequestPart("image") MultipartFile image, @RequestPart("thumb") MultipartFile thumb,
+                                                  @RequestParam int width, @RequestParam int height,
+                                                  @RequestParam String contentHash) {
+        if (!vaultGuard.e2e(me, vaultVersion)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "End-to-end upload requires a vault");
+        }
+        E2eInput.hash(contentHash);
+        E2eInput.dimensions(width, height);
+        byte[][] parts = E2eInput.image(image, thumb);
+        Instant now = Instant.now();
+        Duration ttl = users.clipTtl(me.userId());
+        // 중복: 가장 최근 클립과 같은 이미지(같은 HMAC)면 객체를 다시 써서 시각만 갱신
+        Clip latest = clips.findFirstByUserIdOrderByCreatedAtDesc(me.userId()).orElse(null);
+        if (latest != null && latest.getContentHash().equals(contentHash) && renewObjects(latest)) {
+            latest.refresh(me.deviceId(), now, now.plus(ttl));
+            return push(me, ClipResponse.of(clips.save(latest), cipher), HttpStatus.OK);
+        }
+        String key = UUID.randomUUID().toString();
+        try {
+            store.put(IMAGES + key, parts[0]);
+            store.put(THUMBS + key, parts[1]);
+        } catch (RuntimeException e) {
+            log.error("Image storage failed", e);
+            deleteQuietly(store, key);
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "Image storage unavailable");
+        }
+        Clip saved;
+        try {
+            // content는 빈 문자열(가로세로는 컬럼에), 크기는 PNG 크기 = 암호문 - 28
+            Clip c = Clip.image(me.userId(), me.deviceId(), "", contentHash, key, width, height,
+                    parts[0].length - E2eInput.OVERHEAD, now, now.plus(ttl));
+            c.markE2e();
+            saved = clips.save(c);
+        } catch (RuntimeException e) {
+            deleteQuietly(store, key);
+            throw e;
+        }
+        return push(me, ClipResponse.of(saved, ""), HttpStatus.CREATED);
     }
 
     /** 원본 PNG */
@@ -183,14 +247,15 @@ public class ImageClipController {
         }
     }
 
-    /** 내 이미지 클립의 객체를 복호화해서 돌려준다. 남의 클립, 텍스트 클립, 객체 없음 → 404. */
+    /** 내 이미지 클립의 객체를 돌려준다 (옛 행은 복호화, e2e 행은 그대로). 남의 클립, 텍스트 클립, 객체 없음 → 404. */
     private byte[] load(AuthUser me, UUID id, String prefix) {
         Clip c = clips.findByIdAndUserId(id, me.userId())
                 .filter(x -> x.getImageKey() != null)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Image not found"));
         byte[] data = store.get(prefix + c.getImageKey());
         if (data == null) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Image not found");
-        return cipher.decryptBytes(data);
+        // e2e 행은 앱이 암호화한 바이트 그대로 (앱이 푼다), 옛 행은 서버 키로 복호화
+        return c.isE2e() ? data : cipher.decryptBytes(data);
     }
 
     /** 내 기기들에 실시간 알림을 보내고 응답한다. */

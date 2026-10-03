@@ -6,6 +6,11 @@ spring:
     url: jdbc:h2:mem:clipvault;MODE=PostgreSQL;DB_CLOSE_DELAY=-1
     username: sa
     password: ""
+  servlet:
+    multipart:
+      # e2e 이미지 업로드(원본 암호문 <= 10MB + 28바이트, 썸네일 <= 1MB). 한도 검사는 컨트롤러가 다시 정확히 한다.
+      max-file-size: 11MB
+      max-request-size: 12MB
   jpa:
     hibernate:
       # 테스트 시작 시 엔티티를 보고 테이블을 새로 만들고, 끝나면 지운다
