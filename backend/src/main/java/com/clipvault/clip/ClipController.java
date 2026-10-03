@@ -1,6 +1,7 @@
 package com.clipvault.clip;
 
 import com.clipvault.auth.AuthUser;
+import com.clipvault.auth.UserRepository;
 import com.clipvault.common.AesCipher;
 import com.clipvault.common.HashUtil;
 import com.clipvault.storage.ImageStore;
@@ -11,7 +12,6 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Limit;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
@@ -45,6 +45,8 @@ import org.springframework.web.server.ResponseStatusException;
 @RequestMapping("/api/clips")
 public class ClipController {
 
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(ClipController.class);
+
     /** 업로드 요청. 공백만 있는 문자열은 안 되고, 최대 10만 자. */
     public record UploadRequest(@NotBlank @Size(max = 100_000) String content) {
     }
@@ -58,16 +60,16 @@ public class ClipController {
     private final AesCipher cipher;
     /** WebSocket(STOMP)으로 메시지를 보내는 스프링 도구. 특정 topic을 구독 중인 모든 연결에 메시지를 뿌린다. */
     private final SimpMessagingTemplate messaging;
-    /** 클립 보관 기간 (기본 7일, application.yml의 clipvault.clip.ttl). */
-    private final Duration ttl;
+    /** 사용자별 클립 보관 기간(기본 7일)을 읽는 데 쓴다. */
+    private final UserRepository users;
     private final ImageStore store;
 
     public ClipController(ClipRepository clips, AesCipher cipher, SimpMessagingTemplate messaging,
-                          @Value("${clipvault.clip.ttl}") Duration ttl, ImageStore store) {
+                          UserRepository users, ImageStore store) {
         this.clips = clips;
         this.cipher = cipher;
         this.messaging = messaging;
-        this.ttl = ttl;
+        this.users = users;
         this.store = store;
     }
 
@@ -88,6 +90,7 @@ public class ClipController {
     public ResponseEntity<ClipResponse> upload(@AuthenticationPrincipal AuthUser me, @Valid @RequestBody UploadRequest req) {
         String hash = HashUtil.sha256(req.content());
         Instant now = Instant.now();
+        Duration ttl = users.clipTtl(me.userId()); // 사용자가 고른 보관 기간
         // 직전 클립과 비교 (전체 이력이 아니라 "가장 최근 1건"과만 비교한다)
         Clip latest = clips.findFirstByUserIdOrderByCreatedAtDesc(me.userId()).orElse(null);
         boolean duplicate = latest != null && latest.getContentHash().equals(hash);
@@ -97,7 +100,7 @@ public class ClipController {
             latest.refresh(me.deviceId(), now, now.plus(ttl));
             clip = clips.save(latest);
         } else {
-            // 새 내용: 암호화해서 저장. 만료 시각 = 지금 + 보관기간(7일)
+            // 새 내용: 암호화해서 저장. 만료 시각 = 지금 + 보관 기간(사용자 설정, 기본 7일)
             clip = clips.save(new Clip(me.userId(), me.deviceId(), cipher.encrypt(req.content()), hash, now, now.plus(ttl)));
         }
         // 응답과 알림에는 평문을 담는다 (방금 받은 원문을 그대로 쓰므로 다시 복호화할 필요 없음)
@@ -128,9 +131,12 @@ public class ClipController {
     /**
      * 즐겨찾기 고정. 204 No Content. 이미 고정돼 있으면 아무것도 안 하고 204.
      *
-     * @throws ResponseStatusException 404 클립이 없거나 다른 사람의 클립,
-     *         400 이미지 클립 (버킷 수명 주기 규칙이 파일을 지워서 고정해도 이미지가 사라진다),
-     *         409 이미 10개를 고정함
+     * <p><b>이미지 클립</b>: 버킷 수명 주기 규칙(객체 생성 31일 뒤 삭제) 때문에 고정만 해서는 파일이 결국 사라진다.
+     * 그래서 고정하는 순간 객체를 다시 써서 생성 시각을 새로 하고, 그 뒤로는 매일 정리 배치가 다시 쓴다
+     * ({@link ClipCleanupJob#renewPinnedImages}).</p>
+     *
+     * @throws ResponseStatusException 404 클립이 없거나 다른 사람의 클립, 또는 이미지 파일이 이미 없음,
+     *         409 이미 10개를 고정함, 503 이미지 저장소 오류
      */
     // ponytail(의도적 단순화): 개수 확인과 저장 사이에 잠금이 없어 두 기기에서 동시에 고정하면 11개가 될 수 있다. 해가 없어 그대로 둔다.
     @PutMapping("/{id}/pin")
@@ -138,23 +144,45 @@ public class ClipController {
     public void pin(@AuthenticationPrincipal AuthUser me, @PathVariable UUID id) {
         Clip clip = owned(me, id);
         if (clip.isPinned()) return;
-        if (clip.getType() == ClipType.IMAGE) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Image clips cannot be pinned");
-        }
         if (clips.countByUserIdAndPinnedTrue(me.userId()) >= MAX_PINNED) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "At most " + MAX_PINNED + " clips can be pinned");
         }
+        if (clip.getImageKey() != null) renewForPin(clip.getImageKey());
         clip.pin();
         clips.save(clip);
     }
 
-    /** 고정 해제. 204 No Content. 만료 시각은 지금부터 보관 기간(7일) 뒤로 다시 잡는다. 404는 {@link #pin}과 같다. */
+    /**
+     * 고정 해제. 204 No Content. 만료 시각은 지금부터 보관 기간(사용자 설정) 뒤로 다시 잡는다.
+     * 이미지는 객체도 다시 써서 그 기간(최대 30일, 버킷 규칙 31일) 동안 파일이 남아 있게 한다 (실패해도 해제는 진행, 로그만). 404는 {@link #pin}과 같다.
+     */
     @DeleteMapping("/{id}/pin")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void unpin(@AuthenticationPrincipal AuthUser me, @PathVariable UUID id) {
         Clip clip = owned(me, id);
+        if (!clip.isPinned()) return;
+        Duration ttl = users.clipTtl(me.userId());
+        if (clip.getImageKey() != null) {
+            try {
+                ImageClipController.renew(store, clip.getImageKey());
+            } catch (RuntimeException e) {
+                log.warn("Failed to renew image objects on unpin {}", clip.getImageKey(), e);
+            }
+        }
         clip.unpin(Instant.now().plus(ttl));
         clips.save(clip);
+    }
+
+    /** 고정할 이미지의 객체를 다시 쓴다. 파일이 이미 없으면 404, 저장소 오류면 503 (둘 다 고정하지 않음). */
+    private void renewForPin(String imageKey) {
+        boolean ok;
+        try {
+            ok = ImageClipController.renew(store, imageKey);
+        } catch (RuntimeException e) {
+            log.error("Image storage failed", e);
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "Image storage unavailable");
+        }
+        if (!ok) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Image not found");
     }
 
     /** 내 클립을 찾는다. 없거나 남의 것이면 404 (남의 클립이 "존재한다"는 사실도 알려 주지 않는다). */

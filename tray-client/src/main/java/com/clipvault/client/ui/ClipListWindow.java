@@ -8,6 +8,7 @@ import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
 import javax.swing.text.DefaultEditorKit;
 import java.awt.*;
+import java.awt.event.InputEvent;
 import java.awt.event.KeyEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
@@ -27,8 +28,9 @@ import java.util.function.Consumer;
  * <p>각 항목은 두 줄짜리 카드다: 첫 줄은 내용 미리보기, 둘째 줄은 "3분 전 · 다른 기기" 같은 정보.
  * 항목을 클릭하거나 방향키로 고른 뒤 Enter를 누르면 그 텍스트가 로컬 클립보드에 복사된다(바로 Ctrl+V 가능).
  * 항목에 마우스를 올리면 오른쪽에 휴지통 아이콘이 나타나고, 그걸 누르거나 Delete 키를 누르면 서버에서 삭제된다.
- * 휴지통 왼쪽의 핀을 누르면 고정(즐겨찾기)된다: 고정한 클립은 만료되지 않고 목록 맨 위에 모인다 (최대 10개, 텍스트만).
+ * 휴지통 왼쪽의 핀을 누르면 고정(즐겨찾기)된다: 고정한 클립은 만료되지 않고 목록 맨 위에 모인다 (최대 10개).
  * 목록은 {@link #PAGE}개씩 받아 오고, 더 있으면 맨 끝의 "더 보기" 줄로 다음 페이지를 이어 붙인다.
+ * 팝업이 떠 있는 동안 다른 PC에서 복사한 클립은 {@link #push}로 바로 목록에 들어온다.
  * Esc를 누르거나 다른 곳을 클릭하면(포커스를 잃으면) 닫힌다.</p>
  *
  * <p>위쪽 검색칸에 글자를 치면 그 글자가 들어 있는 텍스트 클립만 남는다. 창이 뜨면 검색칸에 포커스가 있어서
@@ -66,6 +68,13 @@ public class ClipListWindow {
     static final int MAX_PINNED = 10;
     /** 목록 맨 끝의 "더 보기" 줄을 나타내는 표시용 항목 (진짜 클립이 아니다). */
     private static final JsonNode MORE = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
+    /** 검색 결과가 하나도 없을 때 목록 맨 위에 넣는 "검색 결과 없음" 안내 줄 (진짜 클립이 아니다). */
+    private static final JsonNode EMPTY = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
+    /**
+     * 떠 있는 팝업에 실시간으로 새 클립을 넣는 함수. 팝업이 없으면 null.
+     * 팝업이 떠 있는 동안 다른 PC에서 복사한 클립이 창을 다시 열지 않아도 목록에 나타나게 한다 ({@link #push}).
+     */
+    private static Consumer<JsonNode> pushTo;
 
     /**
      * 팝업을 띄운다.
@@ -116,20 +125,24 @@ public class ClipListWindow {
         search.putClientProperty("JTextField.leadingIcon", new FlatSearchIcon());
         search.putClientProperty("JTextField.showClearButton", true);
         JLabel hint = new JLabel(HINT);
-        // 개수 배지: 검색 중이면 "보이는 개수 / 전체", 아니면 "전체개" ("더 보기" 줄은 세지 않는다)
+        // 개수 배지: 검색 중이면 "보이는 개수 / 전체", 아니면 "전체개" ("더 보기"/"검색 결과 없음" 줄은 세지 않는다)
         Runnable updateCount = () -> {
-            int shown = model.size() - (more[0] ? 1 : 0);
+            int shown = 0;
+            for (int k = 0; k < model.size(); k++) if (isClip(model.get(k))) shown++;
             count.setText(search.getText().isBlank() ? all.size() + "개" : shown + " / " + all.size() + "개");
         };
-        // 목록을 all과 검색어로 다시 채운다. prefer가 목록에 있으면 그걸, 없으면 첫 항목을 선택한다.
+        // 목록을 all과 검색어로 다시 채운다. prefer가 목록에 있으면 그걸, 없으면 첫 번째로 고를 수 있는 항목을 선택한다.
         Consumer<JsonNode> rebuild = prefer -> {
             model.clear();
             for (JsonNode c : all) if (matches(c, search.getText())) model.addElement(c);
+            // 검색했는데 맞는 게 없으면 안내 줄 (클립이 아예 없는 경우는 "비어 있음" 화면이 따로 있다)
+            if (model.isEmpty() && !search.getText().isBlank()) model.addElement(EMPTY);
             if (more[0]) model.addElement(MORE); // 검색 중에도 둔다: 더 받아 와서 더 넓게 검색할 수 있게
             hover[0] = -1;
             int i = prefer == null ? -1 : model.indexOf(prefer);
-            if (!model.isEmpty()) list.setSelectedIndex(Math.max(i, 0));
             if (i >= 0) list.ensureIndexIsVisible(i);
+            else i = model.isEmpty() ? -1 : model.get(0) == EMPTY ? model.size() - 1 : 0; // 안내 줄은 고르지 않는다 (있으면 "더 보기")
+            if (i >= 0 && model.get(i) != EMPTY) list.setSelectedIndex(i); else list.clearSelection();
             updateCount.run();
         };
         // 검색어가 바뀔 때마다 목록을 다시 채우고 첫 항목을 선택한다 (바로 Enter로 복사할 수 있게)
@@ -157,14 +170,15 @@ public class ClipListWindow {
         Runnable pick = () -> {
             JsonNode c = list.getSelectedValue();
             if (c == MORE) { loadMore.run(); return; }
+            if (c == null || c == EMPTY) return; // 고른 게 없으면(검색 결과 없음) 아무것도 안 한다
             d.dispose();
-            if (c != null) onPick.accept(c);
+            onPick.accept(c);
         };
-        // 고정/해제: 목록에서 바로 바꾸고(고정은 맨 위로) 호출한 쪽에 알린다. 이미지는 고정할 수 없다(버킷에서 지워지므로).
+        // 고정/해제: 목록에서 바로 바꾸고(고정은 맨 위로) 호출한 쪽에 알린다.
         java.util.function.IntConsumer togglePin = i -> {
             if (i < 0 || i >= model.size()) return;
             JsonNode c = model.get(i);
-            if (!pinnable(c)) return;
+            if (!isClip(c)) return;
             boolean on = !c.path("pinned").asBoolean();
             if (on && all.stream().filter(x -> x.path("pinned").asBoolean()).count() >= MAX_PINNED) {
                 flash(hint, "고정은 최대 " + MAX_PINNED + "개까지 할 수 있어요");
@@ -176,23 +190,51 @@ public class ClipListWindow {
             rebuild.accept(c);
             onPin.accept(c, on);
         };
+        // ----- 본문: 목록 또는 "비어 있음" 안내. 클립을 다 지우거나 빈 창에 새 클립이 들어오면 서로 바뀐다 -----
         JPanel root = new JPanel(new BorderLayout());
+        JScrollPane scroll = new JScrollPane(list);
+        scroll.setBorder(BorderFactory.createEmptyBorder(0, 6, 8, 6));
+        scroll.setOpaque(false);
+        scroll.getViewport().setOpaque(false);
+        scroll.getVerticalScrollBar().setUnitIncrement(16);
+        scroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+        JComponent emptyView = emptyState();
+        JPanel right = new JPanel(new GridBagLayout()); // 개수 배지 (세로 가운데 정렬용)
+        right.setOpaque(false);
+        right.add(count);
+        // true = 목록 화면, false = "비어 있음" 화면. 개수 배지와 검색칸은 목록 화면에서만 보인다.
+        // 창이 이미 떠 있으면 아래쪽(트레이 쪽) 위치를 유지한 채 크기만 바꾼다.
+        Consumer<Boolean> showBody = listMode -> {
+            int bottom = d.getY() + d.getHeight();
+            root.remove(listMode ? emptyView : scroll);
+            // 목록 실제 높이만큼 늘리되 최대 420px, 그 이상은 세로 스크롤
+            scroll.setPreferredSize(new Dimension(WIDTH, Math.min(list.getPreferredSize().height, 420) + 10));
+            root.add(listMode ? scroll : emptyView, BorderLayout.CENTER);
+            right.setVisible(listMode);
+            search.setVisible(listMode);
+            d.pack();
+            if (d.isVisible()) {
+                d.setLocation(d.getX(), bottom - d.getHeight());
+                if (listMode) search.requestFocusInWindow();
+            }
+        };
+        // 실시간 새 클립: all에 넣고(같은 클립이면 갱신되어 제자리로) 선택은 그대로 둔다. 빈 창이었으면 목록 화면으로.
+        pushTo = clip -> {
+            boolean wasEmpty = all.isEmpty() && !more[0];
+            merge(all, List.of(clip));
+            rebuild.accept(list.getSelectedValue());
+            if (wasEmpty) showBody.accept(true);
+        };
         // 삭제 처리: 목록에서 바로 빼고, 개수 배지를 고치고, 호출한 쪽에 알린다. 다 지우면 "비어 있음" 화면으로 바꾼다.
         java.util.function.IntConsumer delete = i -> {
-            if (i < 0 || i >= model.size() || model.get(i) == MORE) return;
+            if (i < 0 || i >= model.size() || !isClip(model.get(i))) return;
             JsonNode c = model.remove(i);
             all.remove(c);
             hover[0] = -1;
             onDelete.accept(c);
             updateCount.run();
             if (all.isEmpty() && !more[0]) {
-                int bottom = d.getY() + d.getHeight(); // 팝업 아래쪽(트레이 쪽) 위치를 유지한 채 크기만 줄인다
-                root.remove(1);
-                root.add(emptyState(), BorderLayout.CENTER);
-                count.getParent().setVisible(false);
-                search.getParent().remove(search); // 검색할 게 없으니 검색칸도 뺀다
-                d.pack();
-                d.setLocation(d.getX(), bottom - d.getHeight());
+                showBody.accept(false);
             } else if (!model.isEmpty()) {
                 list.setSelectedIndex(Math.min(i, model.size() - 1)); // 키보드로 연달아 지울 수 있게 다음 항목 선택
             }
@@ -231,6 +273,8 @@ public class ClipListWindow {
         bind(search, KeyEvent.VK_DOWN, () -> move(list, 1));
         // Enter = 선택
         bind(search, KeyEvent.VK_ENTER, pick);
+        // Ctrl+P = 선택한 클립 고정/해제 (마우스의 핀 버튼과 같다)
+        bind(search, KeyStroke.getKeyStroke(KeyEvent.VK_P, InputEvent.CTRL_DOWN_MASK), () -> togglePin.accept(list.getSelectedIndex()));
         // Delete = 검색어가 비어 있으면 선택한 항목 삭제, 검색어가 있으면 원래대로 글자 지우기
         Action deleteChar = search.getActionMap().get(DefaultEditorKit.deleteNextCharAction);
         bind(search, KeyEvent.VK_DELETE, () -> {
@@ -245,6 +289,10 @@ public class ClipListWindow {
         d.addWindowFocusListener(new WindowAdapter() {
             @Override public void windowLostFocus(WindowEvent e) { d.dispose(); }
         });
+        // 닫히면 실시간 넣기도 끊는다 (새 팝업이 이미 떠서 open이 바뀌었으면 건드리지 않는다)
+        d.addWindowListener(new WindowAdapter() {
+            @Override public void windowClosed(WindowEvent e) { if (open == d) pushTo = null; }
+        });
 
         // ----- 머리말: "최근 클립" + 개수, 안내 문구 -----
         JPanel header = new JPanel(new BorderLayout());
@@ -255,43 +303,20 @@ public class ClipListWindow {
         title.setIcon(new ImageIcon(Theme.appIcon(18, false)));
         title.setIconTextGap(8);
         header.add(title, BorderLayout.WEST);
-        if (!model.isEmpty()) {
-            JPanel right = new JPanel(new GridBagLayout()); // 세로 가운데 정렬용
-            right.setOpaque(false);
-            right.add(count);
-            header.add(right, BorderLayout.EAST);
-        }
+        header.add(right, BorderLayout.EAST);
         hint.setFont(Theme.font(11f, Font.PLAIN));
         hint.setForeground(Theme.muted());
         hint.setBorder(BorderFactory.createEmptyBorder(4, 26, 0, 0));
         JPanel south = new JPanel(new BorderLayout(0, 10));
         south.setOpaque(false);
         south.add(hint, BorderLayout.NORTH);
-        if (!model.isEmpty()) south.add(search, BorderLayout.SOUTH); // 클립이 없으면 검색칸도 없다
+        south.add(search, BorderLayout.SOUTH);
         header.add(south, BorderLayout.SOUTH);
-
-        // ----- 본문: 목록 또는 "비어 있음" 안내 -----
-        JComponent body;
-        if (model.isEmpty()) {
-            body = emptyState();
-        } else {
-            JScrollPane scroll = new JScrollPane(list);
-            scroll.setBorder(BorderFactory.createEmptyBorder(0, 6, 8, 6));
-            scroll.setOpaque(false);
-            scroll.getViewport().setOpaque(false);
-            scroll.getVerticalScrollBar().setUnitIncrement(16);
-            scroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
-            // 목록 실제 높이만큼 늘리되 최대 420px, 그 이상은 세로 스크롤
-            int h = Math.min(list.getPreferredSize().height, 420);
-            scroll.setPreferredSize(new Dimension(WIDTH, h + 10));
-            body = scroll;
-        }
 
         root.setBorder(BorderFactory.createLineBorder(Theme.border())); // 팝업 가장자리 얇은 선
         root.add(header, BorderLayout.NORTH);
-        root.add(body, BorderLayout.CENTER);
         d.setContentPane(root);
-        d.pack();
+        showBody.accept(!model.isEmpty()); // 클립이 없으면 "비어 있음" 화면 (pack 포함)
 
         // 위치: 마우스 포인터(= 방금 클릭한 트레이 아이콘) 바로 위에 띄우되, 화면 밖이나 작업표시줄 위로 삐져나가지 않게 조정
         GraphicsConfiguration gc = GraphicsEnvironment.getLocalGraphicsEnvironment().getDefaultScreenDevice().getDefaultConfiguration();
@@ -320,10 +345,31 @@ public class ClipListWindow {
                 && clip.path("content").asText().toLowerCase(Locale.ROOT).contains(q);
     }
 
-    /** 키 하나를 동작에 연결한다 (컴포넌트에 포커스가 있을 때). */
+    /**
+     * 떠 있는 최근 클립 팝업에 실시간으로 들어온 클립을 넣는다 (화면 스레드에서 호출).
+     *
+     * @return 팝업이 떠 있어서 목록에 넣었으면 true (호출한 쪽은 "읽지 않음" 수를 늘리지 않아도 된다)
+     */
+    public static boolean push(JsonNode clip) {
+        if (pushTo == null) return false;
+        pushTo.accept(clip);
+        return true;
+    }
+
+    /** 진짜 클립인지 ("더 보기", "검색 결과 없음" 줄이 아닌지). */
+    private static boolean isClip(JsonNode c) {
+        return c != MORE && c != EMPTY;
+    }
+
+    /** 수식 키 없는 키 하나를 동작에 연결한다 (컴포넌트에 포커스가 있을 때). */
     private static void bind(JComponent c, int key, Runnable r) {
-        String name = "clipvault." + key;
-        c.getInputMap().put(KeyStroke.getKeyStroke(key, 0), name);
+        bind(c, KeyStroke.getKeyStroke(key, 0), r);
+    }
+
+    /** 키 조합 하나를 동작에 연결한다 (컴포넌트에 포커스가 있을 때). */
+    private static void bind(JComponent c, KeyStroke ks, Runnable r) {
+        String name = "clipvault." + ks;
+        c.getInputMap().put(ks, name);
         c.getActionMap().put(name, new AbstractAction() {
             @Override public void actionPerformed(java.awt.event.ActionEvent e) { r.run(); }
         });
@@ -332,13 +378,14 @@ public class ClipListWindow {
     /** 선택을 위(-1)/아래(+1)로 한 칸 옮기고 보이게 스크롤한다. 끝에서는 멈춘다. */
     private static void move(JList<?> list, int step) {
         int n = list.getModel().getSize();
-        if (n == 0) return;
-        int i = Math.max(0, Math.min(n - 1, list.getSelectedIndex() + step));
+        int first = n > 0 && list.getModel().getElementAt(0) == EMPTY ? 1 : 0; // 안내 줄은 건너뛴다
+        if (n <= first) return;
+        int i = Math.max(first, Math.min(n - 1, list.getSelectedIndex() + step));
         list.setSelectedIndex(i);
         list.ensureIndexIsVisible(i);
     }
 
-    private static final String HINT = "클릭 / Enter: 복사   ·   핀: 고정   ·   휴지통 / Delete 키: 삭제";
+    private static final String HINT = "클릭 / Enter: 복사  ·  핀 / Ctrl+P: 고정  ·  휴지통 / Delete: 삭제";
 
     /**
      * all에 clips를 넣는다. 같은 ID가 이미 있으면 새 값으로 바꾸고, 전체를 "고정 먼저, 그다음 최신순"으로 정렬한다.
@@ -360,11 +407,6 @@ public class ClipListWindow {
         page.forEach(c -> ids.add(c.path("id").asText()));
         return all.stream().filter(c -> !c.path("pinned").asBoolean() && ids.contains(c.path("id").asText()))
                 .findFirst().orElse(null);
-    }
-
-    /** 고정할 수 있는 항목인지: 진짜 클립이고 이미지가 아니어야 한다. */
-    private static boolean pinnable(JsonNode c) {
-        return c != MORE && !"IMAGE".equals(c.path("type").asText());
     }
 
     /** 안내 문구 자리에 잠깐(3초) 다른 문구를 보여 준다. */
@@ -390,10 +432,10 @@ public class ClipListWindow {
     private static int zone(JList<JsonNode> list, int i, Point p) {
         Rectangle r = list.getCellBounds(i, i);
         JsonNode c = list.getModel().getElementAt(i);
-        if (r == null || !r.contains(p) || c == MORE) return 0;
+        if (r == null || !r.contains(p) || !isClip(c)) return 0;
         int right = r.x + r.width;
         if (p.x >= right - TRASH_W) return TRASH;
-        if (p.x >= right - TRASH_W - PIN_W && pinnable(c)) return PIN;
+        if (p.x >= right - TRASH_W - PIN_W) return PIN;
         return 0;
     }
 
@@ -545,6 +587,9 @@ public class ClipListWindow {
         private final Theme.RoundPanel morePanel = new Theme.RoundPanel(new BorderLayout());
         private final JLabel moreLabel = new JLabel("", SwingConstants.CENTER);
         private final boolean[] loading;
+        /** "검색 결과 없음" 줄 */
+        private final JPanel emptyRow = new JPanel(new BorderLayout());
+        private final JLabel emptyLabel = new JLabel("", SwingConstants.CENTER);
 
         ClipCell(String myDeviceId, int[] hover, boolean[] loading, Thumbs thumbs, Runnable repaint) {
             this.myDeviceId = myDeviceId;
@@ -556,6 +601,11 @@ public class ClipListWindow {
             moreLabel.setFont(Theme.font(12f, Font.BOLD));
             moreLabel.setForeground(Theme.ACCENT);
             morePanel.add(moreLabel, BorderLayout.CENTER);
+            emptyRow.setOpaque(false);
+            emptyRow.setBorder(BorderFactory.createEmptyBorder(22, 14, 22, 14));
+            emptyLabel.setFont(Theme.font(12f, Font.PLAIN));
+            emptyLabel.setForeground(Theme.muted());
+            emptyRow.add(emptyLabel, BorderLayout.CENTER);
             panel.setBorder(BorderFactory.createEmptyBorder(9, 14, 9, 14));
             text.setFont(Theme.font(13f, Font.PLAIN));
             time.setFont(Theme.font(11f, Font.PLAIN));
@@ -581,6 +631,10 @@ public class ClipListWindow {
         @Override
         public Component getListCellRendererComponent(JList<? extends JsonNode> list, JsonNode clip, int index,
                                                       boolean selected, boolean focus) {
+            if (clip == EMPTY) {
+                emptyLabel.setText(list.getModel().getSize() > 1 ? "일치하는 클립이 없어요 · 더 보기로 이전 클립도 찾아보세요" : "일치하는 클립이 없어요");
+                return emptyRow;
+            }
             if (clip == MORE) {
                 moreLabel.setText(loading[0] ? "불러오는 중…" : "더 보기");
                 morePanel.fill = selected ? Theme.selected() : index == hover[0] ? Theme.hover() : null;
@@ -610,11 +664,11 @@ public class ClipListWindow {
             boolean hovered = index == hover[0];
             trashIcon.color = hovered && hover[1] == 1 ? Theme.DANGER : Theme.muted();
             trash.setIcon(hovered ? trashIcon : null);
-            // 핀: 고정된 클립은 항상(강조색, 속 채움), 아니면 마우스가 올라간 칸에만. 이미지는 고정할 수 없어 없음.
+            // 핀: 고정된 클립은 항상(강조색, 속 채움), 아니면 마우스가 올라간 칸에만.
             boolean pinned = clip.path("pinned").asBoolean();
             pinIcon.filled = pinned;
             pinIcon.color = pinned || (hovered && hover[1] == PIN) ? Theme.ACCENT : Theme.muted();
-            pin.setIcon(pinnable(clip) && (pinned || hovered) ? pinIcon : null);
+            pin.setIcon(pinned || hovered ? pinIcon : null);
             // 선택 > 마우스오버 > 없음 순서로 배경 결정
             panel.fill = selected ? Theme.selected() : index == hover[0] ? Theme.hover() : null;
             return panel;

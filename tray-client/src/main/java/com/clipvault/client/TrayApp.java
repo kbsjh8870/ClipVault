@@ -42,7 +42,12 @@ import java.util.concurrent.Executors;
  *   <li>{@link EchoGuard}: 업로드해도 되는지 판단 (서버에서 받은 걸 되돌려 보내지 않기)</li>
  *   <li>{@link ClipSocket}: 서버 실시간 알림 수신 → {@link #onPush}, 재연결 시 {@link #onConnected}</li>
  *   <li>{@link Updater}: 하루에 한 번 새 버전 확인 → 메뉴에 "업데이트" 항목 표시</li>
+ *   <li>{@link HotKeys}: 전역 단축키 (최근 클립, 일시정지)</li>
+ *   <li>{@link AutoStart}: 윈도우 시작 시 자동 실행 (레지스트리 Run 키)</li>
+ *   <li>{@link ClipListWindow}: 최근 클립 팝업 (검색, 고정, 더 보기, 떠 있는 동안 실시간 추가 → {@link ClipListWindow#push})</li>
  * </ul>
+ *
+ * <p>보관 기간과 고정은 서버에 저장되는 사용자 설정이라 모든 PC에 같이 적용된다. 트레이 메뉴는 서버 값을 보여 주고 바꿀 뿐이다.</p>
  *
  * <p><b>스레드 규칙</b> (Swing 프로그램의 기본 규칙)</p>
  * <ul>
@@ -59,7 +64,10 @@ public class TrayApp {
     /** 서버에서 받아 로컬에 넣은 텍스트는 5초 동안 다시 업로드하지 않는다. */
     private final EchoGuard guard = new EchoGuard(Clock.systemUTC(), Duration.ofSeconds(5));
     private final ClipboardWatcher watcher = new ClipboardWatcher(this::onLocalCopy, this::onLocalImage);
-    /** 받아 온 썸네일 (클립 id → 이미지). 목록은 최근 20개만 보이므로 최근 50개만 메모리에 두고 오래된 것부터 버린다. */
+    /**
+     * 받아 온 썸네일 (클립 id → 이미지). 목록 창은 화면에 보이는 칸의 썸네일만 요청하므로
+     * 최근 50개만 메모리에 두고 가장 오래 안 쓴 것부터 버린다 (더 보기로 넘어가면 다시 받는다).
+     */
     private final Map<String, Image> thumbs = Collections.synchronizedMap(new LinkedHashMap<>(64, 0.75f, true) {
         @Override
         protected boolean removeEldestEntry(Map.Entry<String, Image> eldest) {
@@ -96,6 +104,11 @@ public class TrayApp {
     /** 단축키 표시를 갱신하려고 기억해 두는 항목들. EDT에서만 접근. */
     private JMenuItem clipsItem;
     private JCheckBoxMenuItem pauseItem;
+    /** "보관 기간" 하위 메뉴의 항목들 (일 수 → 항목). 서버 설정을 받으면 해당 항목에 체크한다. EDT에서만 접근. */
+    private final Map<Integer, JRadioButtonMenuItem> ttlItems = new LinkedHashMap<>();
+    private final ButtonGroup ttlGroup = new ButtonGroup();
+    /** 서버에 저장된 보관 기간(일). 아직 모르면 0. EDT에서만 접근. */
+    private int ttlDays;
     /** "업데이트 (v1.2.3)" 메뉴 항목. 새 버전이 없으면 null. EDT에서만 접근. */
     private JMenuItem updateItem;
     /** 설치할 새 버전 정보. EDT에서만 접근. */
@@ -200,6 +213,15 @@ public class TrayApp {
                 icon.displayMessage("ClipVault", "자동 실행 설정을 바꾸지 못했습니다: " + ex.getMessage(), TrayIcon.MessageType.WARNING);
             }
         });
+        // 보관 기간: 서버의 사용자 설정. 로그인하면 현재 값에 체크된다 (텍스트, 이미지 모두)
+        JMenu ttl = new JMenu("보관 기간");
+        for (int days : new int[]{1, 3, 7, 30}) {
+            JRadioButtonMenuItem item = new JRadioButtonMenuItem(days + "일");
+            item.addActionListener(e -> changeTtl(days));
+            ttlGroup.add(item);
+            ttlItems.put(days, item);
+            ttl.add(item);
+        }
         JMenuItem keys = new JMenuItem("단축키 설정…");
         keys.addActionListener(e -> HotKeyDialog.show(hotKeys, this::refreshMenuLabels));
         // 현재 버전 (누를 수 없는 회색 항목). IDE에서 실행하면 버전 정보가 없다.
@@ -212,6 +234,7 @@ public class TrayApp {
         menu.add(clips);
         menu.add(devices);
         menu.add(pause);
+        menu.add(ttl);
         menu.add(autoStart);
         menu.add(keys);
         menu.addSeparator();
@@ -332,6 +355,51 @@ public class TrayApp {
         loggedIn = true;
         socket.start();
         SwingUtilities.invokeLater(this::updateTooltip);
+        // 보관 기간 설정을 받아 메뉴에 체크
+        async(() -> {
+            int days = api.getSettings().path("clipTtlDays").asInt();
+            SwingUtilities.invokeLater(() -> selectTtl(days));
+        });
+    }
+
+    /** (EDT) 보관 기간 메뉴에서 days 항목에 체크한다. 모르는 값(0 등)이면 체크를 모두 푼다. */
+    private void selectTtl(int days) {
+        ttlDays = days;
+        JRadioButtonMenuItem item = ttlItems.get(days);
+        if (item != null) item.setSelected(true); else ttlGroup.clearSelection();
+    }
+
+    /**
+     * (EDT) 메뉴에서 보관 기간을 골랐을 때. 서버에 저장하면 기존 클립에도 바로 적용된다.
+     * 줄이는 경우에는 그보다 오래된 클립이 곧바로 사라지므로 먼저 확인을 받는다.
+     */
+    private void changeTtl(int days) {
+        int prev = ttlDays;
+        if (!loggedIn) { selectTtl(prev); showLogin(); return; }
+        if (days == prev) return;
+        if (prev > 0 && days < prev && JOptionPane.showConfirmDialog(null,
+                days + "일보다 오래된 클립은 바로 사라집니다 (고정한 클립은 그대로).\n보관 기간을 " + days + "일로 줄일까요?",
+                "보관 기간 변경", JOptionPane.OK_CANCEL_OPTION, JOptionPane.WARNING_MESSAGE) != JOptionPane.OK_OPTION) {
+            selectTtl(prev); // 취소: 체크를 원래대로
+            return;
+        }
+        selectTtl(days);
+        async(() -> {
+            try {
+                api.putSettings(days);
+            } catch (ApiClient.ApiException e) {
+                if (e.status == 401) throw e;
+                SwingUtilities.invokeLater(() -> {
+                    selectTtl(prev);
+                    icon.displayMessage("ClipVault", "보관 기간을 바꾸지 못했습니다: " + e.getMessage(), TrayIcon.MessageType.WARNING);
+                });
+            } catch (RuntimeException e) {
+                SwingUtilities.invokeLater(() -> {
+                    selectTtl(prev);
+                    icon.displayMessage("ClipVault", "서버에 연결하지 못해 보관 기간을 바꾸지 못했습니다.", TrayIcon.MessageType.WARNING);
+                });
+            }
+        });
     }
 
     /**
@@ -342,6 +410,7 @@ public class TrayApp {
         loggedIn = false;
         socket.stop();
         updateTooltip();
+        selectTtl(0); // 로그아웃 상태에서는 설정을 모른다
         if (loginOpen) return;
         loginOpen = true;
         try {
@@ -513,8 +582,11 @@ public class TrayApp {
         }
         String p = preview; // 람다 안에서 쓰려면 값이 바뀌지 않는(effectively final) 변수여야 한다
         SwingUtilities.invokeLater(() -> {
-            unread++;
-            updateTooltip();
+            // 최근 클립 창이 떠 있으면 그 목록에 바로 넣는다 (보고 있으니 "읽지 않음"으로 세지 않는다)
+            if (!ClipListWindow.push(clip)) {
+                unread++;
+                updateTooltip();
+            }
             icon.displayMessage("새 클립", p, TrayIcon.MessageType.INFO); // 윈도우 알림 풍선
         });
     }

@@ -11,8 +11,9 @@ import org.springframework.transaction.annotation.Transactional;
 /**
  * 만료된 클립을 DB에서 실제로 지우는 배치 작업.
  *
- * <p>클립은 7일이 지나면 조회 결과에서는 바로 빠지지만(ClipRepository의 조회 조건),
- * DB에는 남아 있다. 이 작업이 하루에 한 번 돌면서 그런 행들을 물리적으로 삭제한다.
+ * <p>클립은 보관 기간(사용자 설정, 기본 7일)이 지나면 조회 결과에서는 바로 빠지지만(ClipRepository의 조회 조건),
+ * DB에는 남아 있다. 이 작업이 하루에 한 번 돌면서 그런 행들을 물리적으로 삭제한다(고정한 클립은 제외).
+ * 같은 시각에 고정한 이미지의 버킷 객체도 다시 써서 수명 주기 규칙에 지워지지 않게 한다({@link #renewPinnedImages}).
  * 민감한 복사 내용이 서버에 무기한 쌓이지 않게 하기 위한 것이다(PRD: TTL 경과 후 24시간 이내 삭제).</p>
  *
  * <p>실행 시각은 application.yml의 {@code clipvault.clip.cleanup-cron} (기본 {@code "0 0 4 * * *"} = 매일 새벽 4시).
@@ -52,5 +53,27 @@ public class ClipCleanupJob {
         int deleted = clips.deleteExpired(now);
         log.info("Deleted {} expired clips", deleted);
         return deleted;
+    }
+
+    /**
+     * 고정한 이미지의 버킷 객체를 다시 써서(생성 시각 갱신) 버킷 수명 주기 규칙(31일 뒤 삭제)에 지워지지 않게 한다.
+     * 하루에 한 번이면 넉넉하다: 며칠 실패해도 31일 안에만 다시 쓰면 된다. 실패한 것은 로그만 남기고 계속한다.
+     *
+     * @return 다시 쓴 이미지 수
+     */
+    // ponytail(의도적 단순화): 객체를 받아서 그대로 다시 올린다(서버 쪽 복사 API 대신). 고정은 사용자당 10개라 양이 적다.
+    @Scheduled(cron = "${clipvault.clip.cleanup-cron}")
+    public int renewPinnedImages() {
+        int renewed = 0;
+        for (String key : clips.findPinnedImageKeys()) {
+            try {
+                if (ImageClipController.renew(store, key)) renewed++;
+                else log.warn("Pinned image objects missing: {}", key);
+            } catch (RuntimeException e) {
+                log.warn("Failed to renew pinned image {}", key, e);
+            }
+        }
+        log.info("Renewed {} pinned images", renewed);
+        return renewed;
     }
 }

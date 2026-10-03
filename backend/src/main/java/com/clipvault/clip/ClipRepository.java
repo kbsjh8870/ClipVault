@@ -30,6 +30,9 @@ public interface ClipRepository extends JpaRepository<Clip, UUID> {
     /** 사용자의 고정 클립 전체 (최신순). 최대 10개라 페이지 넘김이 필요 없다. */
     List<Clip> findByUserIdAndPinnedTrueOrderByCreatedAtDesc(UUID userId);
 
+    /** 사용자의 고정 안 된 클립 전체. 보관 기간을 바꿨을 때 만료 시각을 다시 계산하는 데 쓴다. */
+    List<Clip> findByUserIdAndPinnedFalse(UUID userId);
+
     /** 사용자의 고정 클립 개수 (10개 제한 확인용). */
     long countByUserIdAndPinnedTrue(UUID userId);
 
@@ -43,6 +46,10 @@ public interface ClipRepository extends JpaRepository<Clip, UUID> {
     @Modifying
     @Query("delete from Clip c where c.expiresAt <= :now and c.pinned = false")
     int deleteExpired(@Param("now") Instant now);
+
+    /** 고정한 이미지 클립들의 버킷 키. 매일 객체를 다시 써서 버킷 수명 주기 규칙에 지워지지 않게 하는 데 쓴다. */
+    @Query("select c.imageKey from Clip c where c.pinned = true and c.imageKey is not null")
+    List<String> findPinnedImageKeys();
 
     /** 만료된 이미지 클립들의 버킷 키. 행을 지우기 전에 버킷 객체부터 지우는 데 쓴다. */
     @Query("select c.imageKey from Clip c where c.expiresAt <= :now and c.pinned = false and c.imageKey is not null")

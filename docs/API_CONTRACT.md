@@ -7,7 +7,7 @@
 
 - Gradle 멀티프로젝트, 루트 `./gradlew` 사용. JDK 21. Spring Boot 4.1.x.
 - `:backend` — Spring Boot. 테스트는 H2(PostgreSQL 모드), 운영은 PostgreSQL.
-- `:tray-client` — 순수 Java 21 + Swing. 외부 의존성은 `com.fasterxml.jackson.core:jackson-databind` 하나만 허용.
+- `:tray-client` — 순수 Java 21 + Swing. 외부 의존성은 `jackson-databind`(JSON), `flatlaf`(테마), `jna-platform`(전역 단축키, 레지스트리)만 허용.
   HTTP는 `java.net.http.HttpClient`, WebSocket은 `java.net.http.WebSocket` + 직접 구현한 최소 STOMP.
 
 ## 1. 설정 (backend `application.yml`)
@@ -21,7 +21,6 @@
 | `clipvault.jwt.access-ttl` | | `15m` |
 | `clipvault.jwt.refresh-ttl` | | `30d` |
 | `clipvault.crypto.key` | `CLIP_ENCRYPTION_KEY` | 없음(필수, base64 인코딩된 32바이트 AES 키) |
-| `clipvault.clip.ttl` | | `7d` |
 | `clipvault.clip.cleanup-cron` | | `0 0 4 * * *` |
 
 스키마는 `ddl-auto: update` (Flyway 없음).
@@ -52,10 +51,16 @@
 - `GET /api/devices` → `200` `[{id, deviceName, os, lastSeenAt, active}]` (내 기기, active만, lastSeenAt 내림차순)
 - `DELETE /api/devices/{id}` → `204` (active=false, refreshTokenHash=null). 남의 기기 → 404.
 
+### Settings (device 토큰 필수, 사용자 단위)
+- `GET /api/settings` → `200` `{clipTtlDays}` 클립 보관 기간(일). 기본 7.
+- `PUT /api/settings` `{clipTtlDays}` → `204`. 허용 값 1·3·7·30, 그 밖은 `400`.
+  - 기존 클립에도 적용: 고정 안 된 클립의 `expiresAt`을 `createdAt + 새 기간`으로 다시 계산 (줄이면 오래된 클립은 즉시 목록에서 빠짐). 고정 클립은 그대로.
+  - 이미지 클립도 같은 기간을 따른다 (버킷 수명 주기 규칙은 최대 보관 기간 30일보다 긴 31일).
+
 ### Clips (device 토큰 필수, 아니면 403)
 - `POST /api/clips` `{content}` → 신규 `201` / 중복 `200`, body = ClipResponse
   - content: 공백만 있는 문자열 불가, 최대 100_000자.
-  - 중복: 같은 user의 **가장 최근** 클립과 `contentHash`가 같으면 새 레코드 없이 `createdAt`,`expiresAt`, `sourceDeviceId` 갱신 후 200. 이 경우도 WS push 한다.
+  - 중복: 같은 user의 **가장 최근** 클립과 `contentHash`가 같으면 새 레코드 없이 `createdAt`,`expiresAt`, `sourceDeviceId` 갱신 후 200. `expiresAt` = 지금 + 사용자 보관 기간. 이 경우도 WS push 한다.
 - `POST /api/clips/image` (PNG 바이트, `Content-Type: image/png`) → 신규 `201` / 중복 `200`, body = ClipResponse
   - 처리 순서: 크기 확인 (Content-Length ≤ 10MB = 10 × 1024 × 1024, 아니면 `413`) → 본문 읽기 (초과면 `413`) → 이미지 헤더 확인(PNG 형식, 픽셀 ≤ 5천만, 아니면 `400`) → 해시 계산 → 최근 클립과 같으면 시각 갱신 `200` 푸시 → 새 내용이면 썸네일 생성 → 원본·썸네일 암호화 → 버킷 저장(`503` 실패) → DB 저장(실패 시 객체 삭제 후 500) → `201` 푸시.
   - 이미지 한도: PNG 바이트 10MB, 픽셀 5천만(가로×세로).
@@ -66,9 +71,10 @@
   - `before`(선택): 그 시각보다 먼저 만들어진 것만. "더 보기"는 앞 페이지 마지막 항목의 `createdAt`을 넘긴다. 형식이 틀리면 `400`.
 - `GET /api/clips?pinned=true` → `200` `[ClipResponse]` 고정한 클립 전체(최대 10개), createdAt 내림차순. limit/before 무시.
 - `DELETE /api/clips/{id}` → `204`. 이미지 클립이면 버킷 객체(원본·썸네일)도 삭제(실패는 로그만). 남의 클립 → 404.
-- `PUT /api/clips/{id}/pin` → `204` 고정(즐겨찾기). 이미 고정이면 그대로 `204`. 이미지 클립 → `400`(버킷 수명 주기 규칙이 파일을 지우므로), 이미 10개 고정 → `409`, 남의 클립 → `404`.
+- `PUT /api/clips/{id}/pin` → `204` 고정(즐겨찾기). 이미 고정이면 그대로 `204`. 이미 10개 고정 → `409`, 남의 클립 → `404`.
+  - 이미지 클립: 고정할 때 버킷 객체(원본·썸네일)를 다시 써서 생성 시각을 갱신한다(수명 주기 규칙 31일 대비). 객체가 이미 없으면 `404`, 저장소 오류 `503` (둘 다 고정 안 됨). 이후 `ClipCleanupJob.renewPinnedImages()`가 매일 다시 쓴다.
   - 고정한 클립은 만료 시각이 지나도 목록에 남고 `ClipCleanupJob`이 지우지 않는다.
-- `DELETE /api/clips/{id}/pin` → `204` 고정 해제. 만료 시각을 지금 + ttl(7일)로 다시 잡는다. 고정 안 된 클립이면 변화 없이 `204`. 남의 클립 → `404`.
+- `DELETE /api/clips/{id}/pin` → `204` 고정 해제. 만료 시각을 지금 + 사용자 보관 기간으로 다시 잡는다. 이미지는 객체도 다시 쓴다(실패는 로그만). 고정 안 된 클립이면 변화 없이 `204`. 남의 클립 → `404`.
 
 ```
 ClipResponse = {id, type, content, contentHash, sourceDeviceId, createdAt, expiresAt, width, height, size, pinned}
@@ -96,13 +102,16 @@ ClipResponse = {id, type, content, contentHash, sourceDeviceId, createdAt, expir
 - `com.clipvault.common.HashUtil` — `public static String sha256(String text)` (소문자 hex), `public static String sha256(byte[] data)` (소문자 hex)
 - `com.clipvault.common.AesCipher` — `public AesCipher(String base64Key)`, `public String encrypt(String plain)`, `public String decrypt(String cipherText)`, `public byte[] encryptBytes(byte[] plain)`, `public byte[] decryptBytes(byte[] data)`. 같은 평문도 매번 다른 암호문. encryptBytes/decryptBytes 형식: IV(12바이트) ‖ 암호문(GCM 태그 포함), base64 없이 바이트 그대로.
 - `com.clipvault.storage.ImageStore` — `public void put(String key, byte[] data)` (없으면 덮어쓰고 실패 시 예외), `public byte[] get(String key)` (없으면 null), `public void delete(String key)` (없어도 예외 없음).
-- `com.clipvault.clip.ClipCleanupJob` — Spring bean, `public int deleteExpired()` 삭제 건수 반환, `@Scheduled(cron = "${clipvault.clip.cleanup-cron}")`.
+- `com.clipvault.clip.ClipCleanupJob` — Spring bean, `public int deleteExpired()` 삭제 건수 반환, `public int renewPinnedImages()` 다시 쓴 고정 이미지 수 반환, 둘 다 `@Scheduled(cron = "${clipvault.clip.cleanup-cron}")`.
 - `com.clipvault.clip.ImageClipController` — `public static void deleteQuietly(ImageStore store, String imageKey)` (두 객체 images/key, thumbs/key 삭제, 실패는 로그만).
 - 엔티티/리포지토리: `com.clipvault.auth.User`/`UserRepository`, `com.clipvault.device.Device`/`DeviceRepository`, `com.clipvault.clip.Clip`/`ClipRepository` (Spring Data JPA). `ClipRepository.findExpiredImageKeys(Instant now)` 반환 `List<String>`, `Clip.getImageKey()` 반환 `String` (null 가능).
 
 ### tray-client
 - `com.clipvault.client.TrayApp` — `main`.
 - `com.clipvault.client.ui.ClipListWindow` — `static boolean matches(JsonNode clip, String query)` (검색), `static void merge(List<JsonNode> all, Iterable<JsonNode> clips)` (ID 중복 제거 + 고정 먼저·최신순 정렬), `public static final int PAGE = 50`.
+- `com.clipvault.client.hotkey.HotKeys` — `public static boolean valid(KeyStroke)` (Ctrl/Alt/Shift 하나 이상 + A–Z/0–9/F1–F12), `static int winModifiers(KeyStroke)` (MOD_ALT=1, MOD_CONTROL=2, MOD_SHIFT=4), `public static String text(KeyStroke)` (예: `Ctrl+Alt+Shift+C`, null이면 `없음`).
+- `com.clipvault.client.update.Updater` — `static boolean isNewer(String latest, String current)` (`x.y.z` 형식만 비교), `static String sha256(Path)`, `static void unzip(Path zip, Path dest)` (zip-slip 방지).
+- `com.clipvault.client.clipboard.Images` — `toArgb`, `key` (픽셀 해시), `toPng`, `fromPng`, `MAX_BYTES = 10MB`.
 - `com.clipvault.client.clipboard.EchoGuard`
   - `public EchoGuard(java.time.Clock clock, java.time.Duration window)`
   - `public void markApplied(String text)` — 서버 클립을 로컬에 반영했을 때 호출

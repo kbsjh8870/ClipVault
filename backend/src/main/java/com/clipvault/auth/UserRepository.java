@@ -18,4 +18,9 @@ public interface UserRepository extends JpaRepository<User, UUID> {
 
     /** 이미 가입된 이메일인지 확인한다. 회원가입 시 중복 체크(409 응답)에 사용. */
     boolean existsByEmail(String email);
+
+    /** 사용자의 클립 보관 기간. 사용자가 없으면(삭제 직후 등) 기본 7일. */
+    default java.time.Duration clipTtl(UUID userId) {
+        return java.time.Duration.ofDays(findById(userId).map(User::getClipTtlDays).orElse(7));
+    }
 }

@@ -21,8 +21,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 /**
  * 즐겨찾기(고정)와 목록 페이지 넘김(before) 통합 테스트.
  *
- * <p>고정한 클립은 만료되지 않고(목록에서 안 빠지고, 정리 배치가 안 지움), 해제하면 지금부터 7일 뒤 만료로 돌아간다.
- * 사용자당 최대 10개, 이미지는 고정할 수 없다.</p>
+ * <p>고정한 클립은 만료되지 않고(목록에서 안 빠지고, 정리 배치가 안 지움), 해제하면 지금부터 보관 기간(기본 7일) 뒤 만료로 돌아간다.
+ * 사용자당 최대 10개. 이미지 고정은 {@link ImagePinTest}.</p>
  */
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -67,7 +67,7 @@ class ClipPinApiTest {
                 .andExpect(jsonPath("$[0].id").value(id));
     }
 
-    /** 해제 → 204, pinned=false, 만료 시각이 지금부터 7일 뒤로 다시 잡힌다 (오래된 클립이 바로 사라지지 않게) */
+    /** 해제 → 204, pinned=false, 만료 시각이 지금부터 보관 기간(기본 7일) 뒤로 다시 잡힌다 (오래된 클립이 바로 사라지지 않게) */
     @Test
     void unpinResetsExpiry() throws Exception {
         String id = clip("was pinned");
@@ -94,14 +94,6 @@ class ClipPinApiTest {
         }
         api.put("/api/clips/" + clip("eleventh") + "/pin", dev.accessToken()).andExpect(status().isConflict());
         api.put("/api/clips/" + first + "/pin", dev.accessToken()).andExpect(status().isNoContent());
-    }
-
-    /** 이미지 클립은 고정 불가 (버킷 수명 주기 규칙이 파일을 지우므로) → 400 */
-    @Test
-    void imageCannotBePinned() throws Exception {
-        String body = api.postImage(dev.accessToken(), Api.png(10, 10, 0x123456))
-                .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString();
-        api.put("/api/clips/" + read(body, "$.id") + "/pin", dev.accessToken()).andExpect(status().isBadRequest());
     }
 
     /** 남의 클립 고정/해제 → 404 */
