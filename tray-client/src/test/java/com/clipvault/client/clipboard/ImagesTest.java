@@ -44,4 +44,20 @@ class ImagesTest {
         img.setRGB(2, 3, 0x80FF0000); // 반투명 픽셀도 보존
         assertEquals(Images.key(img), Images.key(Images.toArgb(Images.fromPng(Images.toPng(img)))));
     }
+
+    @Test
+    void thumbnailFitsLongSide() {
+        BufferedImage wide = new BufferedImage(1920, 1080, BufferedImage.TYPE_INT_RGB);
+        BufferedImage t = Images.fromPng(Images.thumbnail(wide, 240));
+        assertEquals(240, t.getWidth());
+        assertEquals(135, t.getHeight());
+        BufferedImage tall = new BufferedImage(100, 400, BufferedImage.TYPE_INT_RGB);
+        BufferedImage t2 = Images.fromPng(Images.thumbnail(tall, 240));
+        assertEquals(60, t2.getWidth());
+        assertEquals(240, t2.getHeight());
+        BufferedImage small = new BufferedImage(50, 30, BufferedImage.TYPE_INT_RGB);
+        BufferedImage t3 = Images.fromPng(Images.thumbnail(small, 240));
+        assertEquals(50, t3.getWidth(), "smaller than max: original size");
+        assertEquals(30, t3.getHeight());
+    }
 }
