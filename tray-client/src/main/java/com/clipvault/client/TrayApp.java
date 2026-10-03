@@ -5,11 +5,14 @@ import com.clipvault.client.auth.Session;
 import com.clipvault.client.clipboard.ClipboardWatcher;
 import com.clipvault.client.clipboard.EchoGuard;
 import com.clipvault.client.clipboard.Images;
+import com.clipvault.client.crypto.Vault;
+import com.clipvault.client.crypto.VaultCrypto;
 import com.clipvault.client.network.ApiClient;
 import com.clipvault.client.network.ClipSocket;
 import com.clipvault.client.ui.ClipListWindow;
 import com.clipvault.client.ui.DeviceDialog;
 import com.clipvault.client.ui.Theme;
+import com.clipvault.client.ui.VaultDialog;
 import com.clipvault.client.update.Updater;
 import com.clipvault.client.hotkey.HotKeys;
 import com.clipvault.client.ui.HotKeyDialog;
@@ -20,6 +23,7 @@ import java.awt.*;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.image.BufferedImage;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -30,6 +34,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 트레이 앱의 시작점. 모든 부품을 만들어서 서로 연결(wiring)하는 중심 클래스다.
@@ -61,6 +66,12 @@ public class TrayApp {
 
     private final Session session = new Session();
     private final ApiClient api = new ApiClient(session);
+    /** 이 PC의 볼트(종단간 암호화 키). 잠겨 있으면 업로드하지 않고 받은 클립도 풀지 못한다. */
+    private final Vault vault = new Vault();
+    /** 볼트 창(만들기/입력/초기화)이 떠 있거나 뜨는 중인지. 동시에 여러 번 확인이 돌아도(로그인 직후 + 소켓 연결) 창은 하나만. */
+    private final AtomicBoolean vaultPrompting = new AtomicBoolean();
+    /** 옛 클립 이전이 돌고 있는지. 한 번에 하나만 돌려서 같은 클립을 두 번 옮기지 않는다. */
+    private final AtomicBoolean migrating = new AtomicBoolean();
     /** 서버에서 받아 로컬에 넣은 텍스트는 5초 동안 다시 업로드하지 않는다. */
     private final EchoGuard guard = new EchoGuard(Clock.systemUTC(), Duration.ofSeconds(5));
     private final ClipboardWatcher watcher = new ClipboardWatcher(this::onLocalCopy, this::onLocalImage);
@@ -224,6 +235,8 @@ public class TrayApp {
         }
         JMenuItem keys = new JMenuItem("단축키 설정…");
         keys.addActionListener(e -> HotKeyDialog.show(hotKeys, this::refreshMenuLabels));
+        JMenuItem vaultItem = new JMenuItem("볼트 암호 변경…");
+        vaultItem.addActionListener(e -> changeVault());
         // 현재 버전 (누를 수 없는 회색 항목). IDE에서 실행하면 버전 정보가 없다.
         JMenuItem version = new JMenuItem("ClipVault " + (updater.current == null ? "(개발)" : "v" + updater.current));
         version.setEnabled(false);
@@ -237,6 +250,7 @@ public class TrayApp {
         menu.add(ttl);
         menu.add(autoStart);
         menu.add(keys);
+        menu.add(vaultItem);
         menu.addSeparator();
         menu.add(logout);
         menu.add(version);
@@ -360,6 +374,7 @@ public class TrayApp {
             int days = api.getSettings().path("clipTtlDays").asInt();
             SwingUtilities.invokeLater(() -> selectTtl(days));
         });
+        async(this::ensureVault);
     }
 
     /** (EDT) 보관 기간 메뉴에서 days 항목에 체크한다. 모르는 값(0 등)이면 체크를 모두 푼다. */
@@ -433,6 +448,8 @@ public class TrayApp {
             } catch (RuntimeException ignored) {
                 // 오프라인이거나 이미 로그아웃된 기기: 그래도 로컬 로그아웃은 진행한다
             }
+            vault.lock();          // 이 PC에 저장된 볼트 키도 지운다
+            api.vaultVersion = 0;
             session.clear();
             SwingUtilities.invokeLater(this::showLogin);
         });
@@ -440,6 +457,8 @@ public class TrayApp {
 
     /** (EDT) 다른 기기에서 원격 로그아웃당했거나 토큰이 죽었을 때: 로컬 정보만 지우고 로그인 창으로. */
     private void localLogout() {
+        vault.lock();          // 이 PC에 저장된 볼트 키도 지운다
+        api.vaultVersion = 0;
         session.clear();
         // 401로 실패한 썸네일도 있으므로 다시 로그인하면 다시 받아 보게 한다
         thumbsFailed.clear();
@@ -453,8 +472,8 @@ public class TrayApp {
      * 일시정지 중이거나, 로그아웃 상태거나, 너무 길거나, EchoGuard가 막으면 업로드하지 않는다.
      */
     private void onLocalCopy(String text) {
-        if (paused || !loggedIn || text.length() > MAX_CLIP) return;
-        if (guard.shouldUpload(text)) async(() -> api.postClip(text));
+        if (paused || !loggedIn || !vault.ready() || text.length() > MAX_CLIP) return;
+        if (guard.shouldUpload(text)) async(() -> uploadText(text));
     }
 
     /**
@@ -462,7 +481,7 @@ public class TrayApp {
      * PNG로 바꿔 10MB를 넘으면 올리지 않고 한 번 알린다 (같은 이미지는 EchoGuard가 다시 거르므로 알림도 한 번).
      */
     private void onLocalImage(BufferedImage img, String key) {
-        if (paused || !loggedIn || !guard.shouldUpload("img:" + key)) return;
+        if (paused || !loggedIn || !vault.ready() || !guard.shouldUpload("img:" + key)) return;
         async(() -> {
             byte[] png = Images.toPng(img);
             if (png.length > Images.MAX_BYTES) {
@@ -470,17 +489,281 @@ public class TrayApp {
                         "이미지가 10MB를 넘어 동기화하지 않았습니다.", TrayIcon.MessageType.WARNING));
                 return;
             }
-            api.postImage(png);
+            uploadImage(img, png);
         });
+    }
+
+    /** (백그라운드) 텍스트를 볼트로 암호화해서 올린다. 409면 볼트가 바뀐 것 → 다시 확인. */
+    private void uploadText(String text) {
+        withVault(() -> api.postClip(vault.sealText(text), vault.hash(text.getBytes(StandardCharsets.UTF_8))));
+    }
+
+    /** (백그라운드) 이미지: 썸네일을 앱에서 만들고 원본·썸네일을 각각 암호화해서 올린다. */
+    private void uploadImage(BufferedImage img, byte[] png) {
+        byte[] thumb = Images.thumbnail(img, Images.THUMB);
+        withVault(() -> api.postImage(vault.seal(png, Vault.IMAGE), vault.seal(thumb, Vault.THUMB),
+                img.getWidth(), img.getHeight(), vault.hash(png)));
+    }
+
+    /** 볼트를 쓰는 서버 요청 실행. 409(볼트 바뀜)는 볼트를 다시 확인하고, 그 밖의 예외는 그대로 던진다(async가 처리). */
+    private void withVault(Runnable call) {
+        try {
+            call.run();
+        } catch (ApiClient.ApiException e) {
+            if (e.status == 409) { onVaultChanged(); return; }
+            throw e;
+        } catch (IllegalStateException e) {
+            // 업로드 직전에 볼트가 잠김 (로그아웃 등): 조용히 버린다
+        }
+    }
+
+    // --- 볼트 (종단간 암호화) ---
+
+    /**
+     * (백그라운드) 볼트 상태를 서버와 맞춘다. 로그인 직후, 앱 시작, 실시간 연결이 다시 붙을 때마다 부른다.
+     * 없으면 만들기 창, 이 PC에 키가 없거나 버전이 다르면 입력 창, 맞으면 남은 옛 클립을 옮긴다.
+     */
+    private void ensureVault() {
+        JsonNode v;
+        try {
+            v = api.getVault();
+        } catch (ApiClient.ApiException e) {
+            if (e.status == 401) throw e;
+            return;
+        } catch (RuntimeException e) {
+            // 오프라인: 저장된 키가 있으면 그대로 쓴다 (버전이 바뀌었으면 나중에 업로드할 때 409로 알게 된다)
+            if (!vault.ready() && vault.load()) api.vaultVersion = vault.version();
+            SwingUtilities.invokeLater(this::updateTooltip);
+            return;
+        }
+        if (v == null) {
+            if (vaultPrompting.compareAndSet(false, true)) SwingUtilities.invokeLater(this::createVault);
+            return;
+        }
+        int serverVersion = v.path("version").asInt();
+        if (!vault.ready()) vault.load();
+        if (vault.ready() && vault.version() == serverVersion) {
+            api.vaultVersion = serverVersion;
+            SwingUtilities.invokeLater(this::updateTooltip);
+            migrateLegacy();
+            return;
+        }
+        String note = vault.ready() ? "다른 PC에서 볼트가 초기화되었습니다. 새 볼트 암호를 입력하세요." : null;
+        vault.lock();
+        api.vaultVersion = 0;
+        if (vaultPrompting.compareAndSet(false, true)) SwingUtilities.invokeLater(() -> unlockVault(v, note));
+    }
+
+    /** (EDT) 볼트 만들기 창. 성공하면 남은 옛 클립을 옮긴다. */
+    private void createVault() {
+        boolean[] conflict = {false}; // 409를 만났는지 (다른 PC가 먼저 만듦)
+        boolean done;
+        try {
+            done = VaultDialog.create(in -> {
+                byte[] vk = VaultCrypto.newVaultKey();
+                try {
+                    int version = api.createVault(VaultCrypto.wrap(vk, in[0], session.userId));
+                    vault.unlock(vk, version);
+                    api.vaultVersion = version;
+                    return null;
+                } catch (ApiClient.ApiException e) {
+                    if (e.status == 409) {
+                        conflict[0] = true;
+                        return "다른 PC에서 방금 볼트를 만들었습니다. 창을 닫고 그 암호를 입력하세요.";
+                    }
+                    return e.getMessage();
+                }
+            });
+        } finally {
+            vaultPrompting.set(false);
+        }
+        updateTooltip();
+        if (done) {
+            clearThumbCaches();
+            async(this::migrateLegacy);
+        } else if (conflict[0]) {
+            async(this::ensureVault); // 서버에 볼트가 생겼으니 입력 창으로. 그냥 닫았으면 잠긴 채로 둔다(최근 클립을 열 때 다시 묻는다)
+        }
+    }
+
+    /** 잠겨 있는 동안 실패로 기록된 썸네일과 옛 캐시를 비워, 볼트가 열린 뒤 다시 받게 한다. */
+    private void clearThumbCaches() {
+        thumbs.clear();
+        thumbsFailed.clear();
+    }
+
+    /** (EDT) 볼트 입력 창. v = 서버의 감싼 키, note = 안내 문구(없으면 기본). "암호를 잊었어요"면 초기화. */
+    private void unlockVault(JsonNode v, String note) {
+        VaultCrypto.Wrapped w = new VaultCrypto.Wrapped(v.path("salt").asText(), v.path("iterations").asInt(), v.path("wrappedKey").asText());
+        int version = v.path("version").asInt();
+        boolean done;
+        try {
+            done = VaultDialog.unlock(note, in -> {
+                try {
+                    vault.unlock(VaultCrypto.unwrap(w, in[0], session.userId), version);
+                    api.vaultVersion = version;
+                    return null;
+                } catch (VaultCrypto.BadPassphraseException e) {
+                    return "볼트 암호가 맞지 않습니다.";
+                } catch (IllegalArgumentException e) {
+                    return "서버의 볼트 설정이 올바르지 않습니다.";
+                }
+            }, this::resetVault); // 초기화 창도 이 흐름 안이라 끝날 때까지 vaultPrompting이 유지된다
+        } finally {
+            vaultPrompting.set(false);
+        }
+        updateTooltip();
+        if (done) {
+            clearThumbCaches();
+            async(this::migrateLegacy);
+        }
+    }
+
+    /** (EDT) 볼트 초기화 (암호를 잊었을 때): 모든 클립 삭제 후 새 키. */
+    private void resetVault() {
+        boolean done = VaultDialog.reset(in -> {
+            byte[] vk = VaultCrypto.newVaultKey();
+            int version = api.resetVault(VaultCrypto.wrap(vk, in[0], session.userId));
+            vault.unlock(vk, version);
+            api.vaultVersion = version;
+            clearThumbCaches();
+            return null;
+        });
+        updateTooltip();
+        if (done) icon.displayMessage("ClipVault", "볼트를 초기화했습니다. 다른 PC에서는 새 볼트 암호를 입력하세요.", TrayIcon.MessageType.INFO);
+    }
+
+    /** (EDT) 메뉴 "볼트 암호 변경…": 현재 암호로 확인한 뒤 같은 볼트 키를 새 암호로 다시 감싼다. */
+    private void changeVault() {
+        if (!loggedIn) { showLogin(); return; }
+        if (!vault.ready()) { async(this::ensureVault); return; }
+        boolean done = VaultDialog.change(in -> {
+            JsonNode v = api.getVault();
+            if (v == null) return "서버에 볼트가 없습니다.";
+            VaultCrypto.Wrapped current = new VaultCrypto.Wrapped(v.path("salt").asText(), v.path("iterations").asInt(), v.path("wrappedKey").asText());
+            int serverVersion = v.path("version").asInt();
+            // 이 PC의 키가 옛 버전이면(다른 PC에서 초기화됨) 그 키를 새 암호 밑에 저장하면 안 된다
+            if (vault.version() != serverVersion)
+                return "다른 PC에서 볼트가 초기화되었습니다. 메뉴에서 최근 클립을 열어 새 암호를 입력하세요.";
+            byte[] vk;
+            try {
+                vk = VaultCrypto.unwrap(current, in[0], session.userId); // 현재 암호 확인 (자리 비운 PC에서 남이 바꾸지 못하게)
+            } catch (VaultCrypto.BadPassphraseException e) {
+                return "현재 볼트 암호가 맞지 않습니다.";
+            }
+            try {
+                api.changeVault(VaultCrypto.wrap(vk, in[1], session.userId), serverVersion);
+                return null;
+            } catch (ApiClient.ApiException e) {
+                return e.status == 409 ? "다른 PC에서 볼트가 초기화되었습니다." : e.getMessage();
+            } finally {
+                java.util.Arrays.fill(vk, (byte) 0); // 풀어 낸 키를 메모리에 오래 두지 않는다
+            }
+        });
+        if (done) icon.displayMessage("ClipVault", "볼트 암호를 바꿨습니다.", TrayIcon.MessageType.INFO);
+    }
+
+    /** (백그라운드) 업로드에서 409를 받음 = 다른 PC에서 초기화됨. 키를 버리고 다시 확인(입력 창). */
+    private void onVaultChanged() {
+        vault.lock();
+        api.vaultVersion = 0;
+        ensureVault();
+    }
+
+    /**
+     * (백그라운드) 서버 암호화로 남은 옛 클립을 e2e로 옮긴다. 볼트를 쓸 수 있게 될 때마다 부른다(끊겼던 이전을 이어서).
+     * 100개씩 받아 하나씩 암호화해 같은 자리에 덮어쓴다. 한 바퀴 동안 하나도 못 옮기면 다음 실행 때 다시 한다.
+     */
+    private void migrateLegacy() {
+        if (!migrating.compareAndSet(false, true)) return; // 이미 도는 중이면 그쪽에 맡긴다
+        try {
+            migrateLegacyOnce();
+        } finally {
+            migrating.set(false);
+        }
+    }
+
+    private void migrateLegacyOnce() {
+        int moved = 0;
+        try {
+            while (vault.ready()) {
+                JsonNode page = api.listLegacy();
+                if (page.isEmpty()) break;
+                int before = moved;
+                for (JsonNode c : page) {
+                    String id = c.path("id").asText();
+                    try {
+                        if ("IMAGE".equals(c.path("type").asText())) {
+                            byte[] png = api.getImage(id); // 옛 행이라 서버가 평문으로 준다
+                            byte[] thumb = Images.thumbnail(Images.fromPng(png), Images.THUMB);
+                            api.putE2eImage(id, vault.seal(png, Vault.IMAGE), vault.seal(thumb, Vault.THUMB), vault.hash(png));
+                        } else {
+                            String text = c.path("content").asText();
+                            api.putE2eText(id, vault.sealText(text), vault.hash(text.getBytes(StandardCharsets.UTF_8)));
+                        }
+                        moved++;
+                    } catch (ApiClient.ApiException e) {
+                        if (e.status == 401 || e.status == 409 || e.status == 426) throw e;
+                        System.err.println("Migration skipped " + id + ": " + e.getMessage());
+                    } catch (RuntimeException e) {
+                        System.err.println("Migration skipped " + id + ": " + e);
+                    }
+                }
+                if (moved == before) break;
+            }
+        } catch (ApiClient.ApiException e) {
+            if (e.status == 409) { onVaultChanged(); return; }
+            throw e;
+        } finally {
+            int m = moved;
+            if (m > 0) {
+                thumbs.clear(); // 옮긴 이미지는 이제 암호문이므로 캐시를 비운다
+                SwingUtilities.invokeLater(() -> icon.displayMessage("ClipVault",
+                        "기존 클립 " + m + "개를 종단간 암호화로 옮겼습니다.", TrayIcon.MessageType.INFO));
+            }
+        }
+    }
+
+    /** 화면에 보여 줄 수 없는 클립의 표시 문구 */
+    private static final String LOCKED_TEXT = "🔒 열 수 없는 클립";
+
+    /**
+     * 서버에서 받은 클립 JSON을 화면용으로 연다 (제자리 수정 후 그대로 돌려줌).
+     * e2e 텍스트는 content를 복호화한 평문으로 바꾸고, 못 풀면 locked=true와 안내 문구.
+     * 이미지는 바이트를 받을 때 푼다(여기서는 볼트가 잠겨 있으면 locked만 표시). 옛 행(e2e=false)은 서버가 이미 평문으로 준다.
+     */
+    private JsonNode open(JsonNode clip) {
+        if (!clip.path("e2e").asBoolean()) return clip;
+        com.fasterxml.jackson.databind.node.ObjectNode o = (com.fasterxml.jackson.databind.node.ObjectNode) clip;
+        if (!vault.ready()) {
+            o.put("locked", true);
+            if (!"IMAGE".equals(clip.path("type").asText())) o.put("content", LOCKED_TEXT);
+            return clip;
+        }
+        if ("IMAGE".equals(clip.path("type").asText())) return clip;
+        try {
+            o.put("content", vault.openText(clip.path("content").asText()));
+        } catch (RuntimeException e) {
+            o.put("locked", true);
+            o.put("content", LOCKED_TEXT);
+        }
+        return clip;
+    }
+
+    /** 배열의 클립을 모두 연다. */
+    private JsonNode openAll(JsonNode clips) {
+        clips.forEach(this::open);
+        return clips;
     }
 
     /** 최근 클립 팝업을 띄운다. 목록을 보면 읽지 않은 수를 0으로 되돌린다. */
     private void showClips() {
         if (!loggedIn) { showLogin(); return; }
+        if (!vault.ready()) { async(this::ensureVault); return; } // 잠겨 있으면 목록 대신 볼트 확인(입력 창)
         async(() -> {
             // 고정한 클립(맨 위에 모임) + 최근 첫 페이지
-            JsonNode pinned = api.listPinned();
-            JsonNode clips = api.listClips(ClipListWindow.PAGE);
+            JsonNode pinned = openAll(api.listPinned());
+            JsonNode clips = openAll(api.listClips(ClipListWindow.PAGE));
             SwingUtilities.invokeLater(() -> {
                 unread = 0;
                 updateTooltip();
@@ -509,7 +792,7 @@ public class TrayApp {
         bg.execute(() -> {
             JsonNode page = null;
             try {
-                page = api.listClips(ClipListWindow.PAGE, before);
+                page = openAll(api.listClips(ClipListWindow.PAGE, before));
             } catch (RuntimeException e) {
                 System.err.println("Load more failed: " + e);
             }
@@ -520,8 +803,12 @@ public class TrayApp {
 
     /** 목록에서 고른 클립을 로컬 클립보드에 넣는다. 텍스트는 바로, 이미지는 원본을 받아 온 뒤. */
     private void pick(JsonNode clip) {
+        if (clip.path("locked").asBoolean()) {
+            icon.displayMessage("ClipVault", "열 수 없는 클립입니다 (볼트 암호가 바뀌었을 수 있습니다).", TrayIcon.MessageType.WARNING);
+            return;
+        }
         if ("IMAGE".equals(clip.path("type").asText())) {
-            pickImage(clip.path("id").asText());
+            pickImage(clip);
             return;
         }
         String text = clip.path("content").asText();
@@ -531,11 +818,13 @@ public class TrayApp {
         watcher.write(text);
     }
 
-    /** 이미지 원본을 받아 클립보드에 넣는다. 실패하면 알림 (401은 async가 로그인 화면으로 보낸다). */
-    private void pickImage(String id) {
+    /** 이미지 원본을 받아(e2e면 풀어서) 클립보드에 넣는다. 실패하면 알림 (401은 async가 로그인 화면으로 보낸다). */
+    private void pickImage(JsonNode clip) {
         async(() -> {
             try {
-                BufferedImage img = Images.fromPng(api.getImage(id));
+                byte[] bytes = api.getImage(clip.path("id").asText());
+                if (clip.path("e2e").asBoolean()) bytes = vault.open(bytes, Vault.IMAGE); // e2e는 앱이 푼다
+                BufferedImage img = Images.fromPng(bytes);
                 SwingUtilities.invokeLater(() -> guard.markApplied("img:" + watcher.writeImage(img)));
             } catch (RuntimeException e) {
                 if (e instanceof ApiClient.ApiException a && a.status == 401) throw a;
@@ -547,12 +836,15 @@ public class TrayApp {
     }
 
     /** 목록 창의 썸네일 공급자 ({@link ClipListWindow.Thumbs}). 없으면 백그라운드로 받고 다 받으면 onReady. */
-    private Image thumbnail(String id, Runnable onReady) {
+    private Image thumbnail(JsonNode clip, Runnable onReady) {
+        String id = clip.path("id").asText();
         Image t = thumbs.get(id);
         if (t == null && !thumbsFailed.contains(id) && thumbsLoading.add(id)) {
             async(() -> {
                 try {
-                    thumbs.put(id, Images.fromPng(api.getThumbnail(id)));
+                    byte[] bytes = api.getThumbnail(id);
+                    if (clip.path("e2e").asBoolean()) bytes = vault.open(bytes, Vault.THUMB);
+                    thumbs.put(id, Images.fromPng(bytes));
                     SwingUtilities.invokeLater(onReady);
                 } catch (RuntimeException e) {
                     // 기록만 하고 다시 던진다 (로그·401 로그아웃 처리는 async가 한다)
@@ -572,9 +864,12 @@ public class TrayApp {
      * (원치 않는 순간에 클립보드가 바뀌면 사용자가 붙여넣기할 때 당황하기 때문 - PRD의 "알림 후 클릭 시 반영" 결정)
      */
     private void onPush(JsonNode clip) {
+        open(clip); // e2e 텍스트는 여기서 풀어서 미리보기·목록이 평문을 쓰게 한다
         noteSeen(clip);
         String preview;
-        if ("IMAGE".equals(clip.path("type").asText())) {
+        if (clip.path("locked").asBoolean()) {
+            preview = LOCKED_TEXT;
+        } else if ("IMAGE".equals(clip.path("type").asText())) {
             preview = "새 이미지 · " + clip.path("width").asInt() + "×" + clip.path("height").asInt();
         } else {
             preview = clip.path("content").asText().strip();
@@ -598,6 +893,7 @@ public class TrayApp {
      */
     private void onConnected() {
         async(() -> {
+            ensureVault();
             JsonNode clips = api.listClips(20);
             Instant since = newestSeen;
             int missed = 0;
@@ -638,6 +934,7 @@ public class TrayApp {
     private void updateTooltip() {
         if (icon == null) return;
         String t = !loggedIn ? "ClipVault — 로그인 필요"
+                : !vault.ready() ? "ClipVault — 볼트 잠김 (메뉴에서 최근 클립을 열어 암호 입력)"
                 : "ClipVault" + (paused ? " (일시정지)" : "") + (unread > 0 ? " — 새 클립 " + unread + "개" : "");
         icon.setToolTip(t);
         icon.setImage(Theme.appIcon(32, unread > 0));
