@@ -27,7 +27,7 @@
 | 실시간 통신 | Spring WebSocket (STOMP) | Spring 생태계에 내장되어 있어 별도 인프라(Redis Pub/Sub 등) 없이 시작 가능하고, topic 기반 pub/sub 구조가 "한 사용자의 여러 기기에 동시 브로드캐스트"하는 요구사항과 잘 맞음 |
 | ORM | Spring Data JPA | Spring Boot와 통합이 쉽고, 엔티티 3종(User/Device/Clip) 수준의 단순한 관계형 모델에 적합 |
 | DB | PostgreSQL | 관계형 구조(User-Device-Clip)가 명확하고, Supabase/Neon 등 무료 티어 선택지가 풍부해 예산 최소화 목표에 부합 |
-| 이미지 저장소 | Oracle Object Storage (S3 호환, AWS SDK v2) | 무료 20GB, 서버 경유·AES-GCM 암호화 |
+| 이미지 저장소 | Oracle Object Storage (S3 호환, AWS SDK v2) | 무료 20GB, 앱이 종단간 암호화한 바이트를 그대로 저장 (옛 행은 서버 AES-GCM) |
 | 클라이언트(데스크톱) | Java 21 (Swing/AWT SystemTray) + FlatLaf | 백엔드와 동일 언어로 개발해 새 스택을 익힐 필요가 없고, `java.awt.Toolkit`의 클립보드 API가 OS 종속적이지 않아 추후 macOS 확장 시 재사용 가능성이 높음. FlatLaf로 윈도우 다크/라이트 모드를 따르는 모던 UI |
 | 클라이언트 통신 | `java.net.http` (HttpClient, WebSocket) + STOMP 직접 구현 | 외부 라이브러리 없이 JDK 기본 기능으로 REST/WebSocket 처리. STOMP는 필요한 프레임(CONNECT/SUBSCRIBE/MESSAGE/ERROR)만 구현 |
 | 배포(백엔드) | Oracle Cloud Always Free VM (ARM) + Docker Compose + Caddy | WebSocket을 상시 유지해야 해서 잠드는 무료 호스팅(Render 등)은 부적합, Fly.io/Railway는 유료. Always Free VM은 영구 무료이면서 항상 켜져 있음. Caddy가 HTTPS 인증서를 자동 발급 |
@@ -88,6 +88,10 @@ clipvault/
 | password_hash | varchar | bcrypt 등 |
 | created_at | timestamp | |
 | clip_ttl_days | int, 기본 7 | 클립 보관 기간(일). 1·3·7·30 중 하나 |
+| vault_salt | varchar(32), null | 볼트 암호 PBKDF2 salt (base64) |
+| vault_iterations | int, null | PBKDF2 반복 횟수 |
+| vault_wrapped_key | varchar(128), null | 볼트 암호로 감싼 볼트 키 (base64) |
+| vault_version | int, 기본 0 | 볼트 초기화할 때마다 +1. 0 = 볼트 없음 |
 
 ### Device
 | 필드 | 타입 | 설명 |
@@ -106,7 +110,7 @@ clipvault/
 | id | UUID/PK | |
 | user_id | FK -> User | |
 | source_device_id | FK -> Device | 어느 기기에서 복사됐는지 |
-| content | text (암호화 저장) | 클립 내용 |
+| content | text | 클립 내용. e2e 행은 앱이 만든 암호문(base64), 옛 행은 서버 AES-GCM 암호문 |
 | content_hash | varchar | 중복 방지용 (동일 내용 재복사 시 timestamp만 갱신) |
 | created_at | timestamp | |
 | expires_at | timestamp | created_at(또는 갱신 시각) + 사용자 보관 기간 |
@@ -115,6 +119,7 @@ clipvault/
 | image_key | varchar(64), null | 버킷 객체 이름용 무작위 UUID. 이미지 클립만 |
 | width, height | int, null | 원본 픽셀 크기. 이미지 클립만 |
 | image_size | bigint, null | 원본 PNG 바이트 수. 이미지 클립만 (`size`는 예약어 충돌을 피하려고 `image_size`로 둔다) |
+| e2e | boolean, 기본 false | true = 앱이 종단간 암호화한 행(서버는 그대로 저장·반환), false = 서버 암호화한 옛 행 |
 
 관계: `User 1—N Device`, `User 1—N Clip`, `Device 1—N Clip(source)`
 
@@ -136,7 +141,9 @@ clipvault/
 
 ### 5.3 클립
 - `POST /api/clips` — { content } → 신규 201 / 직전 클립과 같은 내용이면 200 (source_device는 인증 컨텍스트에서 식별)
-- `POST /api/clips/image` — PNG 바이트 → 신규 201 / 직전 이미지와 같으면 200 (서버가 썸네일 생성, 원본·썸네일 암호화 후 버킷 저장)
+- `POST /api/clips/image` — PNG 바이트(옛 방식: 서버가 썸네일 생성·암호화) 또는 multipart `image`·`thumb`(앱이 암호화, `X-Vault-Version` 필요) → 신규 201 / 직전 이미지와 같으면 200
+- 볼트 API: `GET`/`POST`/`PUT /api/vault`, `POST /api/vault/reset` — 감싼 볼트 키 보관·암호 변경·초기화. 업로드는 `X-Vault-Version` 헤더로 볼트 버전을 확인 (볼트 있는데 헤더 없음 426, 버전 다름 409)
+- `GET /api/clips?legacy=true` / `PUT /api/clips/{clipId}/e2e` — 서버 암호화 옛 클립 목록 / 앱이 암호화해 같은 자리로 이전
 - `GET /api/clips?limit=50&before=...` — 최근 클립 목록 조회 (before: 더 보기 기준 시각), `?pinned=true` — 고정 목록
 - `GET /api/clips/{clipId}/image`, `/thumbnail` — 이미지 원본/썸네일
 - `PUT` / `DELETE /api/clips/{clipId}/pin` — 고정/해제 (최대 10개)
@@ -171,7 +178,12 @@ clipvault/
 
 ### 6.4 보안
 - 비밀번호: bcrypt 해시 저장
-- 클립 내용: 서버 저장 시 AES-256-GCM 암호화(매번 랜덤 IV, 위변조 감지). 키는 환경변수로 관리 (v1은 단일 서버 키, 향후 사용자별 키 파생 검토)
+- 클립 내용(v1.6.0~): **종단간 암호화**. 트레이 앱이 텍스트·이미지 원본·썸네일을 AES-256-GCM으로 암호화해 올리고 받은 앱에서만 푼다. 서버·DB·버킷에는 암호문만 있다.
+  - 봉투 암호화: 무작위 볼트 키(VK, 32바이트)를 사용자가 정한 **볼트 암호**에서 `PBKDF2WithHmacSHA256`(salt 16바이트, 60만 회, 앱은 10만 미만 거부)으로 만든 잠금 키로 감싸 서버에 둔다(AAD `clipvault-vault-v1:userId`로 바꿔치기 방지). 암호 변경 = 다시 감싸기만(클립 재암호화 없음). 분실 = 초기화(모든 클립 삭제 후 새 키).
+  - 암호화 키 = `HMAC-SHA256(VK, "clipvault-enc-v1")`, 해시 키 = `HMAC-SHA256(VK, "clipvault-hash-v1")`. 데이터 형식 `IV 12 ‖ 암호문 ‖ 태그`, AAD는 `text-v1`/`image-v1`/`thumb-v1`이라 종류를 바꿔치기하면 복호화에 실패한다.
+  - 중복 판별 해시는 `HMAC-SHA256(해시 키, 평문)`이라 서버가 짐작한 평문과 대조할 수 없다.
+  - PC 저장: VK를 윈도우 DPAPI로 잠가 Preferences에 두고 로그아웃하면 지운다. 볼트 암호는 PC마다 처음 한 번만 입력.
+  - 서버 AES 키(`CLIP_ENCRYPTION_KEY`, 환경변수)는 **옛 행(e2e=false) 전용**으로만 남는다. 앱이 옛 행을 종단간 암호화로 옮기면(`GET ?legacy=true` → `PUT /{id}/e2e`) 서버는 내용을 못 본다. 정리 배치가 매일 옛 행 개수를 로그에 남긴다.
 - 통신: 전 구간 HTTPS/WSS (Caddy가 Let's Encrypt 인증서 자동 발급/갱신)
 - JWT(HS256): accessToken 15분 + refreshToken 30일 로테이션. 로그인 토큰(user)과 기기 토큰(device) 분리
 - 원격 로그아웃: 요청마다 기기 활성 여부를 확인해 즉시 반영, 열린 WebSocket 세션도 서버가 종료
@@ -232,7 +244,8 @@ clipvault/
 - ~~Java 트레이 앱의 배포/패키징(exe화) 난이도 검증 필요~~ → jpackage 포터블 zip으로 해결 (설치 마법사형은 WiX 필요, 미적용)
 - ~~WebSocket 연결 끊김 시 재연결 및 놓친 클립 재동기화 로직 필요~~ → 지수 백오프 재연결 + 재연결 시 `GET /api/clips` 재조회로 구현
 - ~~Fly.io/Railway 무료 티어의 WebSocket 유휴 연결 정책 확인 필요~~ → Oracle VM 사용으로 해당 없음
-- 서버 측 암호화 키 관리 방식은 MVP 이후 개선 필요. `CLIP_ENCRYPTION_KEY` 분실 시 기존 클립 복호화 불가 → 별도 백업 필수
+- ~~서버 측 암호화 키 관리 방식은 MVP 이후 개선 필요~~ → v1.6.0 종단간 암호화로 해결. 단 `CLIP_ENCRYPTION_KEY`는 옛 행(e2e=false)을 읽기 위해 남아 있어, 분실 시 옛 행 복호화 불가 → 옛 행이 0개가 될 때까지 백업 필수
+- 종단간 암호화 남는 위험: (1) 서버가 유출되면 감싼 볼트 키 + salt로 오프라인 암호 대입이 가능하다. PBKDF2 60만 회와 8자 이상으로 늦출 뿐이니 긴 암호를 권장한다(`GET /api/vault`는 device 토큰이 필요해 외부인은 받을 수 없다). (2) 메타데이터(시각, 기기, 종류, 크기, 이미지 가로세로, 고정 여부)는 서버가 계속 본다. (3) 구버전 앱만 쓰는 사용자의 옛 클립(특히 고정한 것)은 서버 암호화로 계속 남는다 → 서버 AES 키 제거는 옛 행이 0개가 된 뒤 별도 작업. (4) 볼트 암호를 잊으면 복구 코드가 없어 초기화(모든 클립 삭제)만 가능하다
 - 민감정보(비밀번호 매니저에서 복사한 값 등) 필터링은 v1에서 별도 처리하지 않음 — "일시정지" 토글로 완화 (구현 완료)
 - 공인 IP가 바뀌면 서버 주소(sslip.io)도 바뀜 → Oracle Reserved Public IP로 고정 권장. 주소 변경 시 exe 재배포 필요
 - 원격 로그아웃 시 WebSocket 종료는 서버 메모리 기반이라 서버 1대에서만 동작 (다중 서버 시 브로드캐스트 필요)
