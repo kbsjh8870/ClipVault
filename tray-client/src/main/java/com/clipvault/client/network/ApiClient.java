@@ -1,6 +1,7 @@
 package com.clipvault.client.network;
 
 import com.clipvault.client.auth.Session;
+import com.clipvault.client.crypto.VaultCrypto;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -48,6 +49,12 @@ public class ApiClient {
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
     /** 서버 주소와 토큰이 들어 있는 로그인 상태. */
     private final Session session;
+
+    /**
+     * 서버 볼트 버전. 0이 아니면 모든 요청에 X-Vault-Version 헤더로 붙인다. 서버는 업로드에서만 본다:
+     * 헤더가 현재 버전과 다르면 409(다른 PC에서 초기화됨), 볼트가 있는데 헤더가 없으면 426(구버전 앱).
+     */
+    public volatile int vaultVersion;
 
     public ApiClient(Session session) {
         this.session = session;
@@ -109,6 +116,39 @@ public class ApiClient {
     /** 기기 원격 로그아웃. */
     public void deleteDevice(String id) { authed("DELETE", "/api/devices/" + enc(id), null); }
 
+    // --- 볼트 (종단간 암호화) ---
+
+    /** 서버의 감싼 볼트 키 {salt, iterations, wrappedKey, version}. 볼트가 없으면 null. */
+    public JsonNode getVault() {
+        try {
+            return authed("GET", "/api/vault", null);
+        } catch (ApiException e) {
+            if (e.status == 404) return null;
+            throw e;
+        }
+    }
+
+    /** 볼트 처음 만들기. 만든 버전(1). 이미 있으면 409. */
+    public int createVault(VaultCrypto.Wrapped w) {
+        return authed("POST", "/api/vault", vaultBody(w, null)).path("version").asInt();
+    }
+
+    /** 볼트 암호 변경(다시 감싸기). version이 서버와 다르면 409. */
+    public void changeVault(VaultCrypto.Wrapped w, int version) {
+        authed("PUT", "/api/vault", vaultBody(w, version));
+    }
+
+    /** 볼트 초기화: 서버가 모든 클립을 지우고 새 키 저장. 새 버전. */
+    public int resetVault(VaultCrypto.Wrapped w) {
+        return authed("POST", "/api/vault/reset", vaultBody(w, null)).path("version").asInt();
+    }
+
+    private static Map<String, Object> vaultBody(VaultCrypto.Wrapped w, Integer version) {
+        Map<String, Object> m = new java.util.HashMap<>(Map.of("salt", w.salt(), "iterations", w.iterations(), "wrappedKey", w.wrappedKey()));
+        if (version != null) m.put("version", version);
+        return m;
+    }
+
     // --- 설정 ---
 
     /** 사용자 설정 ({"clipTtlDays": 7} 등). */
@@ -133,16 +173,37 @@ public class ApiClient {
     /** 클립 고정(on=true) 또는 해제. 고정 개수 초과면 409, 이미지면 400. */
     public void pin(String id, boolean on) { authed(on ? "PUT" : "DELETE", "/api/clips/" + enc(id) + "/pin", null); }
 
-    /** 클립 업로드. */
-    public void postClip(String content) { authed("POST", "/api/clips", Map.of("content", content)); }
+    /** e2e 텍스트 업로드 (content = 볼트로 암호화한 base64, hash = HMAC hex). */
+    public void postClip(String sealedContent, String hash) {
+        authed("POST", "/api/clips", Map.of("content", sealedContent, "contentHash", hash));
+    }
 
     /** 클립 한 건 삭제. */
     public void deleteClip(String id) { authed("DELETE", "/api/clips/" + enc(id), null); }
 
-    /** 이미지 업로드 (PNG 바이트). 큰 파일이라 60초까지 기다린다. */
-    public JsonNode postImage(byte[] png) {
-        return authed(t -> json(exchange("POST", "/api/clips/image",
-                HttpRequest.BodyPublishers.ofByteArray(png), "image/png", t, LONG)));
+    /** e2e 이미지 업로드 (multipart). 큰 파일이라 60초까지 기다린다. */
+    public JsonNode postImage(byte[] sealedImage, byte[] sealedThumb, int width, int height, String hash) {
+        Multipart m = new Multipart().file("image", sealedImage).file("thumb", sealedThumb)
+                .field("width", String.valueOf(width)).field("height", String.valueOf(height)).field("contentHash", hash);
+        return authed(t -> json(exchange("POST", "/api/clips/image", HttpRequest.BodyPublishers.ofByteArray(m.body()),
+                m.contentType(), t, LONG)));
+    }
+
+    // --- 기존 데이터 이전 ---
+
+    /** 서버 암호화로 저장된 옛 클립 최대 100개 (평문으로 온다). */
+    public JsonNode listLegacy() { return authed("GET", "/api/clips?legacy=true", null); }
+
+    /** 옛 텍스트 클립을 같은 자리에서 e2e로. */
+    public void putE2eText(String id, String sealedContent, String hash) {
+        authed("PUT", "/api/clips/" + enc(id) + "/e2e", Map.of("content", sealedContent, "contentHash", hash));
+    }
+
+    /** 옛 이미지 클립을 같은 자리에서 e2e로 (multipart). */
+    public void putE2eImage(String id, byte[] sealedImage, byte[] sealedThumb, String hash) {
+        Multipart m = new Multipart().file("image", sealedImage).file("thumb", sealedThumb).field("contentHash", hash);
+        authed(t -> exchange("PUT", "/api/clips/" + enc(id) + "/e2e", HttpRequest.BodyPublishers.ofByteArray(m.body()),
+                m.contentType(), t, LONG));
     }
 
     /** 이미지 클립의 원본 PNG. */
@@ -213,6 +274,7 @@ public class ApiClient {
                     .method(method, body);
             if (contentType != null) b.header("Content-Type", contentType);
             if (token != null) b.header("Authorization", "Bearer " + token);
+            if (vaultVersion > 0) b.header("X-Vault-Version", String.valueOf(vaultVersion));
             HttpResponse<byte[]> res = http.send(b.build(), HttpResponse.BodyHandlers.ofByteArray());
             if (res.statusCode() / 100 != 2) {
                 // 서버의 에러 JSON에서 message만 꺼낸다. JSON이 아니면 본문 전체를 메시지로 쓴다.

@@ -36,7 +36,9 @@ public class Clip {
     private UUID sourceDeviceId;
 
     /**
-     * 클립 내용. 평문이 아니라 AES-GCM으로 암호화한 base64 문자열이 저장된다.
+     * 클립 내용. 평문이 아니라 암호문(base64 문자열)이 저장된다.
+     * 종단간 암호화 행(e2e=true)은 앱이 볼트 키로 만든 암호문이라 서버는 풀 수 없다.
+     * 옛 행(e2e=false)은 서버가 CLIP_ENCRYPTION_KEY로 AES-GCM 암호화한 값이다(볼트 이전 대상).
      * 평문 최대 10만 자(한글은 UTF-8로 글자당 3바이트)를 암호화 + base64로 늘려도 60만 자 안에 들어오도록 길이를 잡았다.
      */
     @Column(nullable = false, length = 600_000)
@@ -84,6 +86,13 @@ public class Clip {
     @Column(nullable = false, columnDefinition = "boolean default false")
     private boolean pinned;
 
+    /**
+     * 종단간 암호화 행인지. true = 앱이 암호화한 값을 서버가 그대로 저장한 행(서버는 풀 수 없다),
+     * false = 서버가 AES로 암호화한 옛 행(볼트 이전 데이터, 앱이 {@code PUT /{id}/e2e}로 옮긴다).
+     */
+    @Column(nullable = false, columnDefinition = "boolean default false")
+    private boolean e2e;
+
     /** JPA 전용 기본 생성자. */
     protected Clip() {
     }
@@ -128,6 +137,18 @@ public class Clip {
         return c;
     }
 
+    /** e2e 행으로 표시한다 (새 e2e 업로드). */
+    public void markE2e() {
+        this.e2e = true;
+    }
+
+    /** 옛 행을 같은 자리에서 e2e로 바꾼다 (기존 데이터 이전). id, 시각, 고정 여부, 이미지 키·크기는 그대로. */
+    public void convertToE2e(String content, String contentHash) {
+        this.content = content;
+        this.contentHash = contentHash;
+        this.e2e = true;
+    }
+
     /** 고정한다. 만료 시각은 그대로 두고, 조회/정리 쿼리가 pinned를 보고 예외로 처리한다. */
     public void pin() {
         this.pinned = true;
@@ -161,4 +182,5 @@ public class Clip {
     public Integer getHeight() { return height; }
     public Long getSize() { return size; }
     public boolean isPinned() { return pinned; }
+    public boolean isE2e() { return e2e; }
 }

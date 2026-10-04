@@ -5,9 +5,9 @@ import com.clipvault.auth.UserRepository;
 import com.clipvault.common.AesCipher;
 import com.clipvault.common.HashUtil;
 import com.clipvault.storage.ImageStore;
+import com.clipvault.vault.VaultGuard;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.Size;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -15,6 +15,7 @@ import java.util.UUID;
 import org.springframework.data.domain.Limit;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -24,6 +25,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
@@ -47,8 +49,11 @@ public class ClipController {
 
     private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(ClipController.class);
 
-    /** 업로드 요청. 공백만 있는 문자열은 안 되고, 최대 10만 자. */
-    public record UploadRequest(@NotBlank @Size(max = 100_000) String content) {
+    /**
+     * 업로드 요청. 옛 방식은 content = 평문(최대 10만 자), e2e는 content = base64 암호문 + contentHash(HMAC hex).
+     * 길이 검사는 방식마다 달라서 컨트롤러에서 한다.
+     */
+    public record UploadRequest(@NotBlank String content, String contentHash) {
     }
 
     /** 사용자당 고정할 수 있는 클립 수. 고정한 클립은 만료되지 않으므로 무한정 쌓이지 않게 막는다. */
@@ -63,9 +68,12 @@ public class ClipController {
     /** 사용자별 클립 보관 기간(기본 7일)을 읽는 데 쓴다. */
     private final UserRepository users;
     private final ImageStore store;
+    /** 업로드가 e2e인지 옛 방식인지 판정 (X-Vault-Version 헤더). */
+    private final VaultGuard vaultGuard;
 
     public ClipController(ClipRepository clips, AesCipher cipher, SimpMessagingTemplate messaging,
-                          UserRepository users, ImageStore store) {
+                          UserRepository users, ImageStore store, VaultGuard vaultGuard) {
+        this.vaultGuard = vaultGuard;
         this.clips = clips;
         this.cipher = cipher;
         this.messaging = messaging;
@@ -87,8 +95,25 @@ public class ClipController {
     // ponytail(의도적 단순화): 중복 확인(조회)과 저장 사이에 잠금이 없다. 똑같은 내용이 정확히 동시에 두 번 올라오면
     // 둘 다 새 클립으로 저장될 수 있다. 클립보드 특성상 거의 일어나지 않고 일어나도 해가 없어서 그대로 둔다.
     @PostMapping
-    public ResponseEntity<ClipResponse> upload(@AuthenticationPrincipal AuthUser me, @Valid @RequestBody UploadRequest req) {
-        String hash = HashUtil.sha256(req.content());
+    public ResponseEntity<ClipResponse> upload(@AuthenticationPrincipal AuthUser me, @Valid @RequestBody UploadRequest req,
+                                               @RequestHeader(value = VaultGuard.HEADER, required = false) Integer vaultVersion) {
+        boolean e2e = vaultGuard.e2e(me, vaultVersion);
+        String hash;
+        String stored;
+        if (e2e) {
+            // 앱이 암호화한 값: 형식만 확인하고 그대로 저장 (서버는 풀 수 없다)
+            E2eInput.text(req.content());
+            E2eInput.hash(req.contentHash());
+            hash = req.contentHash();
+            stored = req.content();
+        } else {
+            // 옛 방식(구버전 앱, 볼트 없음): 평문 최대 10만 자, 서버가 해시·암호화
+            if (req.content().length() > 100_000) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "content must be at most 100000 characters");
+            }
+            hash = HashUtil.sha256(req.content());
+            stored = cipher.encrypt(req.content());
+        }
         Instant now = Instant.now();
         Duration ttl = users.clipTtl(me.userId()); // 사용자가 고른 보관 기간
         // 직전 클립과 비교 (전체 이력이 아니라 "가장 최근 1건"과만 비교한다)
@@ -100,10 +125,12 @@ public class ClipController {
             latest.refresh(me.deviceId(), now, now.plus(ttl));
             clip = clips.save(latest);
         } else {
-            // 새 내용: 암호화해서 저장. 만료 시각 = 지금 + 보관 기간(사용자 설정, 기본 7일)
-            clip = clips.save(new Clip(me.userId(), me.deviceId(), cipher.encrypt(req.content()), hash, now, now.plus(ttl)));
+            // 새 내용 (e2e는 받은 암호문 그대로, 옛 방식은 서버가 암호화한 값). 만료 시각 = 지금 + 보관 기간(사용자 설정, 기본 7일)
+            Clip c = new Clip(me.userId(), me.deviceId(), stored, hash, now, now.plus(ttl));
+            if (e2e) c.markE2e();
+            clip = clips.save(c);
         }
-        // 응답과 알림에는 평문을 담는다 (방금 받은 원문을 그대로 쓰므로 다시 복호화할 필요 없음)
+        // 응답과 알림: e2e는 받은 암호문 그대로, 옛 방식은 받은 평문 그대로 (다시 복호화할 필요 없음)
         ClipResponse body = ClipResponse.of(clip, req.content());
         // 같은 사용자의 모든 기기에 실시간 알림 (중복 재복사도 알림을 보낸다 → 다른 기기 목록에서 맨 위로 올라가도록)
         messaging.convertAndSend("/topic/clips/" + me.userId(), body);
@@ -116,16 +143,40 @@ public class ClipController {
      * @param limit  가져올 개수. 기본 20. 너무 작거나 크게 보내도 1~100 사이로 잘라서(clamp) 쓴다.
      * @param before 이 시각보다 먼저 만들어진 것만 ("더 보기": 앞 페이지 마지막 항목의 createdAt). 없으면 제한 없음.
      * @param pinned true면 limit/before를 무시하고 고정한 클립 전체(최대 10개)를 돌려준다.
+     * @param legacy true면 옛 행(서버 암호화)만 최대 100개 — 앱의 기존 데이터 이전용, 평문으로 돌려준다
      */
     @GetMapping
     public List<ClipResponse> list(@AuthenticationPrincipal AuthUser me, @RequestParam(defaultValue = "20") int limit,
                                    @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant before,
-                                   @RequestParam(defaultValue = "false") boolean pinned) {
-        List<Clip> found = pinned
+                                   @RequestParam(defaultValue = "false") boolean pinned,
+                                   @RequestParam(defaultValue = "false") boolean legacy) {
+        List<Clip> found = legacy
+                ? clips.findTop100ByUserIdAndE2eFalseOrderByCreatedAtDesc(me.userId())
+                : pinned
                 ? clips.findByUserIdAndPinnedTrueOrderByCreatedAtDesc(me.userId())
                 : clips.findVisible(me.userId(), Instant.now(), before == null ? FAR_FUTURE : before, Limit.of(Math.clamp(limit, 1, 100)));
-        // DB의 암호문을 평문으로 복호화해서 응답
-        return found.stream().map(c -> ClipResponse.of(c, cipher.decrypt(c.getContent()))).toList();
+        // 옛 행은 서버 키로 복호화한 평문, e2e 행은 저장된 암호문 그대로 (앱이 푼다)
+        return found.stream().map(c -> ClipResponse.of(c, cipher)).toList();
+    }
+
+    /**
+     * 기존 데이터 이전(텍스트): 옛 행을 같은 자리에서 e2e로 바꾼다. 204.
+     * id·시각·고정 여부는 그대로, content·contentHash를 앱이 암호화한 값으로 바꾼다. 이미 e2e면 아무것도 안 한다(두 PC 동시 이전 대비).
+     *
+     * @throws ResponseStatusException 404 남의 클립, 400 이미지 클립이거나 형식 오류, 426/409 헤더 규칙({@link VaultGuard})
+     */
+    @PutMapping(path = "/{id}/e2e", consumes = MediaType.APPLICATION_JSON_VALUE)
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void migrateText(@AuthenticationPrincipal AuthUser me, @PathVariable UUID id, @RequestBody UploadRequest req,
+                            @RequestHeader(value = VaultGuard.HEADER, required = false) Integer vaultVersion) {
+        if (!vaultGuard.e2e(me, vaultVersion)) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Vault required");
+        Clip clip = owned(me, id);
+        if (clip.isE2e()) return;
+        if (clip.getType() == ClipType.IMAGE) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Use multipart for image clips");
+        E2eInput.text(req.content());
+        E2eInput.hash(req.contentHash());
+        clip.convertToE2e(req.content(), req.contentHash());
+        clips.save(clip);
     }
 
     /**

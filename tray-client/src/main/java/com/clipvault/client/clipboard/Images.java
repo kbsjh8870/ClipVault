@@ -18,6 +18,9 @@ public final class Images {
     /** 서버가 받는 최대 크기 (PNG 바이트). 넘으면 업로드하지 않는다. */
     public static final long MAX_BYTES = 10L * 1024 * 1024;
 
+    /** 썸네일 긴 변 (px). 서버가 옛 방식에서 만들던 크기와 같다. */
+    public static final int THUMB = 240;
+
     private Images() {
     }
 
@@ -54,6 +57,23 @@ public final class Images {
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
+    }
+
+    /**
+     * 긴 변이 max px가 되도록 비율을 유지해 줄인 PNG (원본이 더 작으면 원본 크기).
+     * 종단간 암호화에서는 서버가 이미지를 볼 수 없으므로 썸네일을 앱이 만들어 암호화해서 올린다.
+     */
+    public static byte[] thumbnail(BufferedImage src, int max) {
+        double scale = Math.min(1.0, (double) max / Math.max(src.getWidth(), src.getHeight()));
+        int w = Math.max(1, (int) Math.round(src.getWidth() * scale));
+        int h = Math.max(1, (int) Math.round(src.getHeight() * scale));
+        BufferedImage out = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g = out.createGraphics();
+        g.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION, java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+        g.setRenderingHint(java.awt.RenderingHints.KEY_RENDERING, java.awt.RenderingHints.VALUE_RENDER_QUALITY);
+        g.drawImage(src, 0, 0, w, h, null);
+        g.dispose();
+        return toPng(out);
     }
 
     /** PNG 바이트를 이미지로. 이미지가 아니면 UncheckedIOException. */

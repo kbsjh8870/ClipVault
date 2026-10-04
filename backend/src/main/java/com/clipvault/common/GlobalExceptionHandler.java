@@ -56,6 +56,19 @@ public class GlobalExceptionHandler {
         return of(HttpStatus.BAD_REQUEST, "Malformed request");
     }
 
+    /** multipart 업로드가 설정 한도(spring.servlet.multipart)를 넘음 → 413 */
+    @ExceptionHandler(org.springframework.web.multipart.MaxUploadSizeExceededException.class)
+    ResponseEntity<ErrorResponse> handle(org.springframework.web.multipart.MaxUploadSizeExceededException e) {
+        return of(HttpStatus.PAYLOAD_TOO_LARGE, "Upload too large");
+    }
+
+    /** multipart 파트나 필수 파라미터 누락 → 400 */
+    @ExceptionHandler({org.springframework.web.multipart.support.MissingServletRequestPartException.class,
+            org.springframework.web.bind.MissingServletRequestParameterException.class})
+    ResponseEntity<ErrorResponse> handleMissing(Exception e) {
+        return of(HttpStatus.BAD_REQUEST, "Missing part or parameter");
+    }
+
     /** 공통 응답 생성. 메시지가 비어 있으면 표준 문구(예: "Not Found")로 채운다. */
     private static ResponseEntity<ErrorResponse> of(HttpStatus status, String message) {
         return ResponseEntity.status(status).body(new ErrorResponse(status.value(), message == null ? status.getReasonPhrase() : message));

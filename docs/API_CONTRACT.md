@@ -57,19 +57,44 @@
   - 기존 클립에도 적용: 고정 안 된 클립의 `expiresAt`을 `createdAt + 새 기간`으로 다시 계산 (줄이면 오래된 클립은 즉시 목록에서 빠짐). 고정 클립은 그대로.
   - 이미지 클립도 같은 기간을 따른다 (버킷 수명 주기 규칙은 최대 보관 기간 30일보다 긴 31일).
 
+### Vault (device 토큰 필수, 종단간 암호화)
+서버는 볼트 키를 볼트 암호로 감싼 값만 보관한다. 볼트 암호와 풀린 키는 서버가 알 수 없다.
+- `GET /api/vault` → `200` `{salt, iterations, wrappedKey, version}` / 볼트 없음 `404`
+- `POST /api/vault` `{salt, iterations, wrappedKey}` → `201` `{version: 1}` / 이미 있음 `409`
+- `PUT /api/vault` `{salt, iterations, wrappedKey, version}` → `204` 다시 감싸기(암호 변경, 클립 그대로) / version 불일치 `409` / 볼트 없음 `404`
+- `POST /api/vault/reset` `{salt, iterations, wrappedKey}` → `200` `{version}` 그 사용자의 클립 행과 버킷 객체를 모두 지우고 새 키 저장, version +1
+- 입력 검사: salt는 base64 16바이트, iterations ≥ 100,000, wrappedKey는 base64 60바이트(IV 12 ‖ 키 32 ‖ 태그 16). 아니면 `400`.
+- 감싼 키 `wrappedKey` = `base64(IV 12 ‖ AES-GCM(KEK, 볼트 키, AAD="clipvault-vault-v1:"+userId))`, KEK = `PBKDF2WithHmacSHA256(볼트 암호, salt, iterations, 256bit)`.
+
+### `X-Vault-Version` 헤더 규칙 (클립 업로드·이전)
+| 헤더 | 사용자 볼트 | 처리 |
+|---|---|---|
+| 없음 | 없음 | 옛 방식(구버전 앱 호환): 서버가 평문을 받아 서버 암호화, `e2e=false` |
+| 없음 | 있음 | `426 Upgrade Required` (앱 업데이트 필요) |
+| 있음, 현재 version과 같음 | 있음 | e2e 업로드 |
+| 있음, 다름 (또는 볼트 없음) | — | `409` (볼트가 바뀜: 다른 PC에서 초기화) |
+
 ### Clips (device 토큰 필수, 아니면 403)
 - `POST /api/clips` `{content}` → 신규 `201` / 중복 `200`, body = ClipResponse
   - content: 공백만 있는 문자열 불가, 최대 100_000자.
+  - **e2e 업로드** (`X-Vault-Version` 있음): `{content, contentHash}`. content = base64(`IV 12 ‖ AES-GCM 암호문 ‖ 태그`, AAD `text-v1`), 디코딩 길이 ≤ 12 + 300,000 + 16. contentHash = 소문자 hex 64자(HMAC-SHA256). 아니면 `400`. 서버는 가공 없이 저장하고 `e2e=true`. 중복 판별은 아래와 같다.
   - 중복: 같은 user의 **가장 최근** 클립과 `contentHash`가 같으면 새 레코드 없이 `createdAt`,`expiresAt`, `sourceDeviceId` 갱신 후 200. `expiresAt` = 지금 + 사용자 보관 기간. 이 경우도 WS push 한다.
 - `POST /api/clips/image` (PNG 바이트, `Content-Type: image/png`) → 신규 `201` / 중복 `200`, body = ClipResponse
   - 처리 순서: 크기 확인 (Content-Length ≤ 10MB = 10 × 1024 × 1024, 아니면 `413`) → 본문 읽기 (초과면 `413`) → 이미지 헤더 확인(PNG 형식, 픽셀 ≤ 5천만, 아니면 `400`) → 해시 계산 → 최근 클립과 같으면 시각 갱신 `200` 푸시 → 새 내용이면 썸네일 생성 → 원본·썸네일 암호화 → 버킷 저장(`503` 실패) → DB 저장(실패 시 객체 삭제 후 500) → `201` 푸시.
   - 이미지 한도: PNG 바이트 10MB, 픽셀 5천만(가로×세로).
   - 응답의 `content`는 `[이미지 W×H]` 안내 문구, `width/height/size`는 원본 픽셀·바이트.
-- `GET /api/clips/{id}/image` (image/png) → `200` 복호화한 원본 PNG. 남의 클립, 텍스트 클립, 객체 없음 → `404`.
-- `GET /api/clips/{id}/thumbnail` (image/png) → `200` 복호화한 썸네일 PNG (긴 변 최대 240px, 비율 유지, 원본이 더 작으면 원본 크기). 남의 클립, 텍스트 클립, 객체 없음 → `404`.
+  - **e2e 업로드** (`X-Vault-Version` 있음, `multipart/form-data`): 파트 `image`(암호문 바이트, AAD `image-v1`), `thumb`(암호문 바이트, AAD `thumb-v1`), `width`, `height`, `contentHash`(원본 PNG의 HMAC hex). image ≤ 10MB + 28바이트, thumb ≤ 1MB, 넘으면 `413`. width·height ≥ 1, 곱 ≤ 5천만, 아니면 `400`. PNG 검사·썸네일 생성 없이 받은 바이트를 그대로 버킷에 저장한다(저장 순서와 실패 처리는 위와 같다). 중복이면 객체를 다시 쓰고 시각 갱신 `200`. 응답의 `content`는 빈 문자열.
+- `GET /api/clips/{id}/image` (image/png) → `200` 원본. 옛 행은 서버가 복호화한 PNG, e2e 행은 저장된 암호문 바이트 그대로(앱이 복호화). 남의 클립, 텍스트 클립, 객체 없음 → `404`.
+- `GET /api/clips/{id}/thumbnail` (image/png) → `200` 썸네일 (긴 변 최대 240px, 비율 유지, 원본이 더 작으면 원본 크기). 옛 행은 서버가 복호화한 PNG, e2e 행은 암호문 바이트 그대로. 남의 클립, 텍스트 클립, 객체 없음 → `404`.
 - `GET /api/clips?limit=20&before=<ISO 시각>` → `200` `[ClipResponse]` createdAt 내림차순, 만료 제외(고정 클립은 만료돼도 포함). limit 기본 20, 1~100으로 clamp.
   - `before`(선택): 그 시각보다 먼저 만들어진 것만. "더 보기"는 앞 페이지 마지막 항목의 `createdAt`을 넘긴다. 형식이 틀리면 `400`.
 - `GET /api/clips?pinned=true` → `200` `[ClipResponse]` 고정한 클립 전체(최대 10개), createdAt 내림차순. limit/before 무시.
+- `GET /api/clips?legacy=true` → `200` `[ClipResponse]` `e2e=false`인 내 클립(고정 포함)을 최신순으로 최대 100개. 평문으로 온다. limit/before/pinned 무시. 앱이 종단간 암호화로 옮길 대상을 찾을 때 쓴다.
+- `PUT /api/clips/{id}/e2e` (`X-Vault-Version` 필수, 규칙은 위 표와 같음) → `204` 옛 클립을 같은 자리에서 e2e로 바꾼다.
+  - 텍스트 클립: JSON `{content, contentHash}`. 이미지 클립: multipart `image`, `thumb`, `contentHash` (크기 검사는 e2e 업로드와 같음).
+  - 이미 `e2e=true`면 아무것도 안 하고 `204` (두 PC가 동시에 이전해도 안전).
+  - id, createdAt, expiresAt, pinned, sourceDeviceId, width/height는 그대로. content·contentHash만 바뀐다. 이미지는 같은 버킷 키에 암호문을 먼저 덮어쓰고 DB를 바꾼다(버킷 쓰기 실패 `503`, 행은 옛 상태).
+  - 남의 클립 → `404`.
 - `DELETE /api/clips/{id}` → `204`. 이미지 클립이면 버킷 객체(원본·썸네일)도 삭제(실패는 로그만). 남의 클립 → 404.
 - `PUT /api/clips/{id}/pin` → `204` 고정(즐겨찾기). 이미 고정이면 그대로 `204`. 이미 10개 고정 → `409`, 남의 클립 → `404`.
   - 이미지 클립: 고정할 때 버킷 객체(원본·썸네일)를 다시 써서 생성 시각을 갱신한다(수명 주기 규칙 31일 대비). 객체가 이미 없으면 `404`, 저장소 오류 `503` (둘 다 고정 안 됨). 이후 `ClipCleanupJob.renewPinnedImages()`가 매일 다시 쓴다.
@@ -77,15 +102,18 @@
 - `DELETE /api/clips/{id}/pin` → `204` 고정 해제. 만료 시각을 지금 + 사용자 보관 기간으로 다시 잡는다. 이미지는 객체도 다시 쓴다(실패는 로그만). 고정 안 된 클립이면 변화 없이 `204`. 남의 클립 → `404`.
 
 ```
-ClipResponse = {id, type, content, contentHash, sourceDeviceId, createdAt, expiresAt, width, height, size, pinned}
+ClipResponse = {id, type, content, contentHash, sourceDeviceId, createdAt, expiresAt, width, height, size, pinned, e2e}
 ```
+- `e2e`: true = 앱이 암호화한 행(`content`는 base64 암호문, 서버는 내용을 못 봄), false = 서버 암호화한 옛 행(`content`는 서버가 복호화한 평문).
 - `type`: `"TEXT"` / `"IMAGE"`. 구버전 null 컬럼은 `"TEXT"`로 응답. 테스트 헬퍼 `Api.postImage(token, bytes)` 참고.
 - 텍스트 클립: `width`, `height`, `size` = null. `content`는 업로드된 평문.
 - 이미지 클립: `width`, `height`, `size`는 원본 픽셀·바이트. `content`는 `[이미지 W×H]` 안내 문구.
 - `pinned`: 고정 여부 (boolean).
 - 시각은 ISO-8601 UTC 문자열(`Instant`). id류는 UUID 문자열.
-- `contentHash` = SHA-256 소문자 hex. 텍스트는 content의 UTF-8 바이트, 이미지는 업로드한 PNG 바이트의 해시.
-- DB의 content는 AES-GCM 암호문(base64, 앞 12바이트 IV). API로는 항상 평문.
+- `contentHash`: 옛 행은 SHA-256 소문자 hex(텍스트는 content의 UTF-8 바이트, 이미지는 업로드한 PNG 바이트). e2e 행은 `hex(HMAC-SHA256(해시 키, 평문 바이트))`로 앱이 계산해 보낸다(해시 키는 볼트 키에서 유도하므로 서버는 짐작한 평문과 대조할 수 없다).
+- DB의 content: 옛 행은 서버 AES-GCM 암호문(base64, 앞 12바이트 IV)이고 API로는 평문으로 나간다. e2e 행은 앱이 만든 암호문(base64)이고 API로도 그대로 나간다.
+- 이미지·썸네일 버킷 객체: 옛 행은 서버 암호화, e2e 행은 앱이 암호화한 바이트(`IV ‖ 암호문 ‖ 태그`) 그대로. 서버는 둘을 내용과 무관한 바이트로 다룬다.
+- 에러 보충: `426` 볼트가 있는데 `X-Vault-Version` 없는 업로드, `409` 헤더 버전이 서버 볼트와 다름.
 
 ## 4. WebSocket (STOMP)
 
@@ -111,7 +139,11 @@ ClipResponse = {id, type, content, contentHash, sourceDeviceId, createdAt, expir
 - `com.clipvault.client.ui.ClipListWindow` — `static boolean matches(JsonNode clip, String query)` (검색), `static void merge(List<JsonNode> all, Iterable<JsonNode> clips)` (ID 중복 제거 + 고정 먼저·최신순 정렬), `public static final int PAGE = 50`.
 - `com.clipvault.client.hotkey.HotKeys` — `public static boolean valid(KeyStroke)` (Ctrl/Alt/Shift 하나 이상 + A–Z/0–9/F1–F12), `static int winModifiers(KeyStroke)` (MOD_ALT=1, MOD_CONTROL=2, MOD_SHIFT=4), `public static String text(KeyStroke)` (예: `Ctrl+Alt+Shift+C`, null이면 `없음`).
 - `com.clipvault.client.update.Updater` — `static boolean isNewer(String latest, String current)` (`x.y.z` 형식만 비교), `static String sha256(Path)`, `static void unzip(Path zip, Path dest)` (zip-slip 방지).
-- `com.clipvault.client.clipboard.Images` — `toArgb`, `key` (픽셀 해시), `toPng`, `fromPng`, `MAX_BYTES = 10MB`.
+- `com.clipvault.client.clipboard.Images` — `toArgb`, `key` (픽셀 해시), `toPng`, `fromPng`, `MAX_BYTES = 10MB`, `public static byte[] thumbnail(BufferedImage src, int max)` (긴 변 max px, 비율 유지, 작은 원본은 그대로, PNG 바이트).
+- `com.clipvault.client.crypto.VaultCrypto` — 순수 함수. `record Wrapped(String salt, int iterations, String wrappedKey)`, `newVaultKey()` (32바이트), `wrap(byte[] vaultKey, char[] passphrase, String userId)` (새 salt, `ITERATIONS = 600_000`), `unwrap(Wrapped, char[] passphrase, String userId)` (`MIN_ITERATIONS = 100_000` 미만이면 `IllegalArgumentException`, 틀린 암호·다른 userId는 `BadPassphraseException`), `subKey(byte[] vaultKey, String label)` (`ENC = "clipvault-enc-v1"`, `HASH = "clipvault-hash-v1"`), `seal(byte[] key, byte[] plain, String aad)` / `open(byte[] key, byte[] sealed, String aad)` (`IV 12 ‖ 암호문 ‖ 태그`), `hmacHex(byte[] key, byte[] data)`.
+- `com.clipvault.client.crypto.Vault` — 이 PC의 볼트 상태. `TEXT = "text-v1"`, `IMAGE = "image-v1"`, `THUMB = "thumb-v1"` (AAD), `ready()`, `version()`, `unlock(byte[] vaultKey, int version)`, `load()` / `lock()` (DPAPI로 잠가 Preferences에 저장·로드·삭제), `sealText`/`openText`, `seal`/`open(byte[], String aad)`, `hash(byte[] plain)`.
+- `com.clipvault.client.network.Multipart` — multipart/form-data 본문 작성기. `field(name, value)`, `file(name, byte[])`, `body()`, `contentType()`.
+- `com.clipvault.client.network.ApiClient` (볼트·e2e 관련) — `volatile int vaultVersion` (0이 아니면 모든 요청에 `X-Vault-Version`), `getVault()` (없으면 null), `createVault(Wrapped)`, `changeVault(Wrapped, int version)`, `resetVault(Wrapped)`, `postClip(sealedContent, hash)`, `postImage(sealedImage, sealedThumb, width, height, hash)`, `listLegacy()`, `putE2eText(id, sealedContent, hash)`, `putE2eImage(id, sealedImage, sealedThumb, hash)`.
 - `com.clipvault.client.clipboard.EchoGuard`
   - `public EchoGuard(java.time.Clock clock, java.time.Duration window)`
   - `public void markApplied(String text)` — 서버 클립을 로컬에 반영했을 때 호출

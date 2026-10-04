@@ -134,4 +134,46 @@ public class Api {
         ImageIO.write(img, "png", out);
         return out.toByteArray();
     }
+
+    /** 볼트를 만든다 (형식만 맞는 가짜 값). 만든 version(1)을 돌려준다. */
+    public int createVault(String token) throws Exception {
+        String salt = java.util.Base64.getEncoder().encodeToString(new byte[16]);
+        String key = java.util.Base64.getEncoder().encodeToString(new byte[60]);
+        String body = post("/api/vault", token, "{\"salt\":\"" + salt + "\",\"iterations\":600000,\"wrappedKey\":\"" + key + "\"}")
+                .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString();
+        return read(body, "$.version");
+    }
+
+    /** e2e 텍스트 업로드 (content = base64 암호문, hash = hex 64자). version이 null이면 헤더 없이. */
+    public ResultActions postE2eText(String token, Integer version, String content, String hash) throws Exception {
+        var req = MockMvcRequestBuilders.post("/api/clips").contentType(MediaType.APPLICATION_JSON)
+                .content(json("content", content, "contentHash", hash));
+        if (token != null) req.header("Authorization", "Bearer " + token);
+        if (version != null) req.header("X-Vault-Version", version);
+        return mvc.perform(req);
+    }
+
+    /** e2e 이미지 업로드 (multipart: image, thumb 암호문 + width, height, contentHash). */
+    public ResultActions postE2eImage(String token, Integer version, byte[] image, byte[] thumb, int w, int h, String hash)
+            throws Exception {
+        var req = MockMvcRequestBuilders.multipart("/api/clips/image")
+                .file(new org.springframework.mock.web.MockMultipartFile("image", "image", "application/octet-stream", image))
+                .file(new org.springframework.mock.web.MockMultipartFile("thumb", "thumb", "application/octet-stream", thumb))
+                .param("width", String.valueOf(w)).param("height", String.valueOf(h)).param("contentHash", hash);
+        if (token != null) req.header("Authorization", "Bearer " + token);
+        if (version != null) req.header("X-Vault-Version", version);
+        return mvc.perform(req);
+    }
+
+    /** n바이트 무작위 값 (가짜 암호문). */
+    public static byte[] random(int n) {
+        byte[] b = new byte[n];
+        new java.util.Random(n).nextBytes(b);
+        return b;
+    }
+
+    /** hex 64자 가짜 해시 (c를 64번). */
+    public static String hash(char c) {
+        return String.valueOf(c).repeat(64);
+    }
 }

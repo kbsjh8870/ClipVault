@@ -50,7 +50,8 @@ public class ClipListWindow {
      */
     @FunctionalInterface
     public interface Thumbs {
-        Image get(String clipId, Runnable onReady);
+        /** clip = 클립 JSON 전체 (e2e 여부를 보고 복호화해야 해서 id만으로는 부족하다). */
+        Image get(JsonNode clip, Runnable onReady);
     }
 
     /**
@@ -644,7 +645,7 @@ public class ClipListWindow {
             if ("IMAGE".equals(clip.path("type").asText())) {
                 // 이미지: 썸네일(없으면 회색 자리, 받아지면 repaint로 다시 그려짐) + "이미지 · W×H"
                 int w = clip.path("width").asInt(), h = clip.path("height").asInt();
-                thumbIcon.set(thumbs.get(clip.path("id").asText(), repaint), w, h);
+                thumbIcon.set(thumbs.get(clip, repaint), w, h);
                 text.setText(null);
                 text.setIcon(thumbIcon);
                 time.setText("이미지 · " + w + "×" + h + "  ·  " + ago + "  ·  ");
