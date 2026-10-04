@@ -529,6 +529,9 @@ public class TrayApp {
             v = api.getVault();
         } catch (ApiClient.ApiException e) {
             if (e.status == 401) throw e;
+            // 서버 재시작 중 502/503 등: 오프라인과 같게 저장된 키를 그대로 쓴다 (버전이 바뀌었으면 업로드 때 409로 알게 된다)
+            if (!vault.ready() && vault.load()) api.vaultVersion = vault.version();
+            SwingUtilities.invokeLater(this::updateTooltip);
             return;
         } catch (RuntimeException e) {
             // 오프라인: 저장된 키가 있으면 그대로 쓴다 (버전이 바뀌었으면 나중에 업로드할 때 409로 알게 된다)

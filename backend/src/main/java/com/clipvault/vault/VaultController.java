@@ -68,10 +68,11 @@ public class VaultController {
         validate(req);
         User u = user(me);
         if (u.hasVault()) throw new ResponseStatusException(HttpStatus.CONFLICT, "Vault already exists");
-        u.setVault(req.salt(), req.iterations(), req.wrappedKey());
-        u.bumpVaultVersion();
-        users.save(u);
-        return ResponseEntity.status(HttpStatus.CREATED).body(Map.of("version", u.getVaultVersion()));
+        // 조건부 갱신(version = 0일 때만): 동시에 두 번 만들어도 한쪽만 성공하고 다른 쪽은 409
+        if (users.replaceVaultIfVersion(me.userId(), req.salt(), req.iterations(), req.wrappedKey(), 0) == 0) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Vault already exists");
+        }
+        return ResponseEntity.status(HttpStatus.CREATED).body(Map.of("version", 1));
     }
 
     /** 암호 변경: 같은 볼트 키를 새 잠금 키로 감싼 값으로 바꾼다. 클립은 건드리지 않는다. */
@@ -100,10 +101,13 @@ public class VaultController {
         User u = user(me);
         for (String key : clips.findImageKeysByUserId(me.userId())) ImageClipController.deleteQuietly(store, key);
         clips.deleteByUserId(me.userId());
-        u.setVault(req.salt(), req.iterations(), req.wrappedKey());
-        u.bumpVaultVersion();
-        users.save(u);
-        return Map.of("version", u.getVaultVersion());
+        // 이 요청이 읽은 버전에서만 갱신: 동시에 초기화한 다른 요청이 먼저 이겼으면 0행 → 409.
+        // 예외로 트랜잭션이 롤백되므로 위의 클립 행 삭제도 취소된다.
+        int expected = u.getVaultVersion();
+        if (users.replaceVaultIfVersion(me.userId(), req.salt(), req.iterations(), req.wrappedKey(), expected) == 0) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Vault changed");
+        }
+        return Map.of("version", expected + 1);
     }
 
     /** 형식 검사: salt = base64 16바이트, iterations ≥ 10만, wrappedKey = base64 60바이트. 아니면 400. */

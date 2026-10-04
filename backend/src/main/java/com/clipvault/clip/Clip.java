@@ -36,7 +36,9 @@ public class Clip {
     private UUID sourceDeviceId;
 
     /**
-     * 클립 내용. 평문이 아니라 AES-GCM으로 암호화한 base64 문자열이 저장된다.
+     * 클립 내용. 평문이 아니라 암호문(base64 문자열)이 저장된다.
+     * 종단간 암호화 행(e2e=true)은 앱이 볼트 키로 만든 암호문이라 서버는 풀 수 없다.
+     * 옛 행(e2e=false)은 서버가 CLIP_ENCRYPTION_KEY로 AES-GCM 암호화한 값이다(볼트 이전 대상).
      * 평문 최대 10만 자(한글은 UTF-8로 글자당 3바이트)를 암호화 + base64로 늘려도 60만 자 안에 들어오도록 길이를 잡았다.
      */
     @Column(nullable = false, length = 600_000)

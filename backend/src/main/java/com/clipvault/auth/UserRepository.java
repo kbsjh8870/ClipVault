@@ -3,6 +3,9 @@ package com.clipvault.auth;
 import java.util.Optional;
 import java.util.UUID;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 
 /**
  * {@link User} 테이블에 접근하는 저장소(Repository).
@@ -23,4 +26,15 @@ public interface UserRepository extends JpaRepository<User, UUID> {
     default java.time.Duration clipTtl(UUID userId) {
         return java.time.Duration.ofDays(findById(userId).map(User::getClipTtlDays).orElse(7));
     }
+
+    /**
+     * 볼트 값을 바꾸고 버전을 1 올린다. 단, 현재 버전이 expected일 때만 (조건부 갱신).
+     * 두 요청이 동시에 같은 버전에서 출발해도 한쪽만 1행을 갱신하고 다른 쪽은 0을 돌려받으므로,
+     * 같은 버전에 서로 다른 키가 저장되는 조용한 분기를 막는다. 0이면 호출한 쪽이 409로 처리한다.
+     */
+    @Modifying
+    @Query("update User u set u.vaultSalt = :salt, u.vaultIterations = :iterations, u.vaultWrappedKey = :key, "
+            + "u.vaultVersion = u.vaultVersion + 1 where u.id = :id and u.vaultVersion = :expected")
+    int replaceVaultIfVersion(@Param("id") UUID id, @Param("salt") String salt, @Param("iterations") int iterations,
+                              @Param("key") String key, @Param("expected") int expected);
 }

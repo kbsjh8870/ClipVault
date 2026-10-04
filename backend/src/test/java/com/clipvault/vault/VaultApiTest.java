@@ -100,6 +100,19 @@ class VaultApiTest {
                 .andExpect(jsonPath("$.version").value(2));
     }
 
+    /** 만든 뒤 다시 만들기는 계속 409, 초기화는 매번 버전을 1씩 올린다 (조건부 갱신이 현재 버전을 기준으로 동작) */
+    @Test
+    void createStays409AndResetBumpsEachTime() throws Exception {
+        api.post("/api/vault", dev.accessToken(), body(SALT, 600_000, KEY, null)).andExpect(status().isCreated());
+        api.post("/api/vault", dev.accessToken(), body(SALT, 600_000, b64(60, 6), null)).andExpect(status().isConflict());
+        api.post("/api/vault/reset", dev.accessToken(), body(SALT, 600_000, b64(60, 7), null))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.version").value(2));
+        api.post("/api/vault/reset", dev.accessToken(), body(SALT, 600_000, b64(60, 8), null))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.version").value(3));
+        api.get("/api/vault", dev.accessToken()).andExpect(jsonPath("$.version").value(3))
+                .andExpect(jsonPath("$.wrappedKey").value(b64(60, 8)));
+    }
+
     @Test
     void validatesInput() throws Exception {
         api.post("/api/vault", dev.accessToken(), body(b64(15, 1), 600_000, KEY, null)).andExpect(status().isBadRequest());
