@@ -60,9 +60,9 @@ flowchart LR
 ```
 
 1. 트레이 앱이 로컬 클립보드 변경을 감지하면 `POST /api/clips`로 업로드합니다.
-2. 서버는 내용을 AES-GCM으로 암호화해 저장하고, `/topic/clips/{userId}`를 구독 중인 같은 사용자의 모든 기기에 알립니다.
-3. 알림을 받은 기기는 트레이 알림만 띄웁니다(최근 클립 창이 떠 있으면 목록에도 바로 추가). 자기가 올린 클립의 알림은 무시합니다.
-4. 이미지는 `POST /api/clips/image`로 올리고, 서버가 썸네일을 만들어 원본과 함께 암호화해 Object Storage에 저장합니다.
+2. 앱이 텍스트·이미지·썸네일을 볼트 키로 AES-GCM 암호화해 `X-Vault-Version`과 함께 올립니다. 서버는 암호문을 그대로 저장하고, `/topic/clips/{userId}`를 구독 중인 같은 사용자의 모든 기기에 알립니다.
+3. 알림을 받은 기기는 앱에서 복호화해 트레이 알림만 띄웁니다(최근 클립 창이 떠 있으면 목록에도 바로 추가). 자기가 올린 클립의 알림은 무시합니다.
+4. 이미지는 `POST /api/clips/image`로 올립니다. 앱이 원본과 썸네일을 각각 암호화해 보내고, 서버는 암호문 그대로 Object Storage에 저장합니다. 받는 앱이 복호화합니다.
 
 ## 기술 스택
 
@@ -138,7 +138,7 @@ sudo docker compose -f deploy/docker-compose.prod.yml up -d --build
 | `DOMAIN` | 서버 주소. 도메인이 없으면 `1-2-3-4.sslip.io`처럼 공인 IP 기반 주소를 씁니다 |
 | `DB_URL`, `DB_USERNAME`, `DB_PASSWORD` | PostgreSQL 접속 정보 (JDBC 형식) |
 | `JWT_SECRET` | 토큰 서명 키, 32바이트 이상 (`openssl rand -base64 48`) |
-| `CLIP_ENCRYPTION_KEY` | 클립 암호화 키, base64 32바이트 (`openssl rand -base64 32`). 잃어버리면 저장된 클립을 복호화할 수 없습니다 |
+| `CLIP_ENCRYPTION_KEY` | 클립 암호화 키, base64 32바이트 (`openssl rand -base64 32`). 잃어버리면 옛 서버 암호화 클립(`e2e=false`, 볼트 이전 전 데이터)만 복호화할 수 없습니다. 종단간 암호화 클립은 이 키와 무관합니다 |
 | `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` | 이미지 저장용 Oracle Object Storage(S3 호환) 접속 정보. `S3_BUCKET`이 비어 있으면 로컬 폴더(`IMAGE_LOCAL_DIR`, 기본 `./data/images`)에 저장합니다 |
 
 Caddy가 HTTPS 인증서를 자동으로 발급하고 갱신하며, WebSocket(`wss://`)도 그대로 전달합니다.
